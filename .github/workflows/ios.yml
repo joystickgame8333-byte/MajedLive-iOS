@@ -33,6 +33,8 @@ jobs:
           xcodebuild build -project MajedLive.xcodeproj -scheme MajedLive \
             -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
             -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+          INSTALLED_BUILD=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/device/Build/Products/Release-iphoneos/MajedLive.app/Info.plist)
+          test "$INSTALLED_BUILD" = "$GITHUB_RUN_NUMBER" || { echo "Incorrect installed build number: $INSTALLED_BUILD"; exit 1; }
           mkdir -p build/package/Payload
           cp -R build/device/Build/Products/Release-iphoneos/MajedLive.app build/package/Payload/
           cd build/package
