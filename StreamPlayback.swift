@@ -142,6 +142,7 @@ final class LiveHLSRelay {
     private let source: URL
     private var port: UInt16 = 0
     var onFailure: ((Error) -> Void)?
+    var onRequest: ((String) -> Void)?
     init(source: URL) { self.source = source }
     func start() async throws -> URL {
         let parameters = NWParameters.tcp
@@ -203,6 +204,7 @@ final class LiveHLSRelay {
               let bytes = PublishedStream.base64(String(parts[1])), let value = String(data: bytes, encoding: .utf8),
               let remote = URL(string: value), remote.scheme == "https", remote.host == source.host,
               remote.user == nil, remote.password == nil else { connection.cancel(); return }
+        onRequest?(["css", "m3u8"].contains(remote.pathExtension.lowercased()) ? "قائمة البث" : "مقطع الفيديو")
         do {
             // All URLs retain the original site's signatures; no authentication is replaced.
             let (data, response) = try await PublishedStream.request(remote, headers: ["Origin": "https://player.majed-koora.live"])
@@ -231,16 +233,40 @@ final class LiveHLSRelay {
             let header = "HTTP/1.1 \(status)\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\n\(extra)Cache-Control: no-store\r\nConnection: close\r\n\r\n"
             var result = Data(header.utf8)
             if first[0] != "HEAD" { result.append(body) }
-            connection.send(content: result, completion: .contentProcessed { [weak self] _ in
-                connection.cancel()
-                self?.queue.async { [weak self] in self?.connections.removeAll { $0 === connection } }
-            })
+            finish(connection, response: result)
         } catch {
             onFailure?(error)
-            connection.send(content: Data("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8),
-                            completion: .contentProcessed { _ in connection.cancel() })
+            finish(connection, response: Data("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
         }
     }
+    private func finish(_ connection: NWConnection, response: Data) {
+        // A final TCP context sends FIN after the response bytes. Do not cancel the
+        // connection as soon as Network.framework has merely processed the send.
+        connection.send(content: response, contentContext: .finalMessage, isComplete: true,
+                        completion: .contentProcessed { [weak self] error in
+            guard let self else { connection.cancel(); return }
+            if let error { self.onFailure?(error); self.release(connection); return }
+            self.drain(connection)
+            self.queue.asyncAfter(deadline: .now() + 15) { [weak self] in
+                guard let self, self.connections.contains(where: { $0 === connection }) else { return }
+                self.release(connection)
+            }
+        })
+    }
+    private func drain(_ connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] _, _, done, error in
+            guard let self else { connection.cancel(); return }
+            if done || error != nil { self.release(connection) }
+            else { self.drain(connection) }
+        }
+    }
+    private func release(_ connection: NWConnection) {
+        queue.async { [weak self] in
+            connection.cancel()
+            self?.connections.removeAll { $0 === connection }
+        }
+    }
+
 }
 
 @MainActor
@@ -250,6 +276,8 @@ final class OriginalPlayerModel: ObservableObject {
     @Published var error: String?
     @Published var stage = "تصريح الموقع"
     @Published var details = ""
+    @Published var mediaRequests = 0
+    @Published var lastRequest = "لم يطلب المشغّل بيانات بعد"
     private var readinessTimeout: Task<Void, Never>?
     private static func errorCode(_ error: Error) -> String {
         var result: [String] = []
@@ -266,7 +294,7 @@ final class OriginalPlayerModel: ObservableObject {
     private var relay: LiveHLSRelay?
     private var observation: NSKeyValueObservation?
     func start(server: URL, watch: URL) async {
-        stop(); loading = true; error = nil; stage = "تصريح الموقع"; details = ""
+        stop(); loading = true; error = nil; stage = "تصريح الموقع"; details = ""; mediaRequests = 0; lastRequest = "لم يطلب المشغّل بيانات بعد"
         do {
             let master = try await PublishedStream.resolve(player: server, watch: watch)
             stage = "قائمة البث"
@@ -291,6 +319,12 @@ final class OriginalPlayerModel: ObservableObject {
                 throw APIError.server("لم تصل قائمة البث إلى المشغّل داخل التطبيق.")
             }
             try Task.checkCancellation()
+            relay.onRequest = { [weak self] resource in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.mediaRequests += 1; self.lastRequest = resource
+                }
+            }
             stage = "تشغيل الفيديو"
             let item = AVPlayerItem(url: local)
             observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
@@ -354,11 +388,12 @@ struct OriginalPlayerScreen: View {
                 VStack(spacing: 18) {
                     Text(error).multilineTextAlignment(.center)
                     Text("المرحلة: " + model.stage).font(.caption)
+                    Text("طلبات المشغّل: \(model.mediaRequests) · \(model.lastRequest)").font(.caption)
                     Text(model.details).font(.caption.monospaced()).multilineTextAlignment(.center)
                         .environment(\.layoutDirection, .leftToRight)
                     Button("نسخ تفاصيل الخطأ") {
                         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-                        UIPasteboard.general.string = "Build \(build)\n\(model.stage)\n\(error)\n\(model.details)"
+                        UIPasteboard.general.string = "Build \(build)\n\(model.stage)\n\(error)\nRequests: \(model.mediaRequests) · \(model.lastRequest)\n\(model.details)"
                     }
                     Button("إعادة المحاولة") { retryID = UUID() }.buttonStyle(.borderedProminent)
                 }.foregroundStyle(.white).padding(24)
