@@ -24,6 +24,8 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: ماجد لايف
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

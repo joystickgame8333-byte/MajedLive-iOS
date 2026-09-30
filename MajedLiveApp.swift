@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UIKit
+import AVKit
 
 @main
 struct MajedLiveApp: App {
@@ -181,6 +182,61 @@ struct Playback: Identifiable {
     let id = UUID()
     let title: String
     let url: URL
+    let servers: [StreamServer]
+}
+
+struct StreamServer: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let type: String
+    let url: String
+    let enabled: Bool?
+    let is_default: Bool?
+    let priority: Int?
+    var playbackURL: URL? {
+        guard enabled != false, let value = URL(string: url),
+              value.scheme == "https", value.host != nil,
+              value.user == nil, value.password == nil else { return nil }
+        return value
+    }
+    var nativeVideo: Bool { ["mp4", "m3u8", "hls_js", "dplayer"].contains(type) }
+}
+
+struct WatchCard: Decodable {
+    struct Watch: Decodable {
+        let watch_enabled: Bool
+        let available: Bool
+        let servers: [StreamServer]
+    }
+    let success: Bool
+    let watch: Watch?
+}
+
+struct WatchAPI {
+    func servers(publishedURL: URL) async throws -> [StreamServer] {
+        guard let key = URLComponents(url: publishedURL, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "mk" })?.value, !key.isEmpty else {
+            throw APIError.server("رابط المشاهدة لا يحتوي بيانات السيرفر. اطلب من صاحب الموقع تفعيل رابط المشغّل.")
+        }
+        var endpoint = URLComponents(url: Site.origin.appendingPathComponent("api/public/watch-card"), resolvingAgainstBaseURL: false)!
+        endpoint.queryItems = [URLQueryItem(name: "key", value: key)]
+        var request = URLRequest(url: endpoint.url!)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.server("تعذّر تحميل سيرفرات البث.")
+        }
+        let card = try JSONDecoder().decode(WatchCard.self, from: data)
+        guard card.success, let watch = card.watch, watch.watch_enabled, watch.available else {
+            throw APIError.server("البث غير متاح حاليًا من المصدر.")
+        }
+        let servers = watch.servers.filter { $0.playbackURL != nil && ($0.type == "iframe" || $0.nativeVideo) }
+            .sorted { ($0.priority ?? 0) < ($1.priority ?? 0) }
+        guard !servers.isEmpty else { throw APIError.server("لا يوجد سيرفر يمكن تشغيله داخل التطبيق حاليًا.") }
+        return servers
+    }
 }
 
 struct AppRelease: Decodable {
@@ -268,9 +324,9 @@ final class AppUpdates: ObservableObject {
 }
 
 struct MatchesScreen: View {
-    @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
     @StateObject private var model = ScheduleModel()
     @StateObject private var updates = AppUpdates()
+    @State private var showingSettings = false
     @State private var day = 0
     @State private var playback: Playback?
     @State private var checkingMatch: String?
@@ -282,8 +338,6 @@ struct MatchesScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
-                    appearancePicker
-                    updateControls
                     Picker("اختيار اليوم", selection: $day) {
                         Text("اليوم").tag(0)
                         Text("غدًا").tag(1)
@@ -344,16 +398,75 @@ struct MatchesScreen: View {
                 }
             }
             .onChange(of: day) { _ in model.matches = []; model.updated = nil }
+            .sheet(isPresented: $showingSettings) { SettingsScreen(updates: updates) }
             .fullScreenCover(item: $playback) { selected in PlayerScreen(playback: selected) }
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
             } message: { Text(message ?? "") }
+
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18).fill(Palette.red).frame(width: 56, height: 56)
+                Image(systemName: "soccerball").font(.system(size: 30)).foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("ماجد لايف").font(.title.bold())
+                Text("كل مباراة… في مكان واحد").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            Button { showingSettings = true } label: {
+                Image(systemName: "gearshape").font(.title3).padding(10)
+                    .overlay(alignment: .topTrailing) {
+                        if updates.available != nil {
+                            Circle().fill(Palette.red).frame(width: 8, height: 8)
+                        }
+                    }
+            }.accessibilityLabel(updates.available == nil ? "الإعدادات" : "الإعدادات، تحديث جديد متاح")
+        }.padding(.vertical, 8)
+    }
+
+    @MainActor private func open(_ match: Match) async {
+        guard checkingMatch == nil else { return }
+        checkingMatch = match.id
+        defer { checkingMatch = nil }
+        do {
+            // Recheck availability on every tap; a previously published link can expire.
+            let fresh = try await model.api.load(date: match.date)
+            guard let current = fresh.first(where: { $0.id == match.id }), let url = current.playbackURL else {
+                message = "البث لم يُنشر في الموقع بعد. عندما يفعّله صاحب الموقع سيظهر زر المشاهدة تلقائيًا."
+                await model.refresh(offset: day)
+                return
+            }
+            let servers = try await WatchAPI().servers(publishedURL: url)
+            playback = Playback(title: "\(current.home_team.name) × \(current.away_team.name)", url: url, servers: servers)
+        } catch {
+            message = (error as? APIError)?.errorDescription ?? "تعذّر التحقق من البث. تأكد من الإنترنت وحاول مجددًا."
+        }
+    }
+}
+
+struct SettingsScreen: View {
+    @ObservedObject var updates: AppUpdates
+    @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) { appearancePicker; updateControls }.padding(20)
+            }
+            .background(Palette.background)
+            .navigationTitle("الإعدادات")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("تم") { dismiss() } } }
             .alert("تحديث التطبيق", isPresented: Binding(get: { updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
                 Button("حسنًا", role: .cancel) { updates.notice = nil }
             } message: { Text(updates.notice ?? "") }
         }
     }
-
     private var updateControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let release = updates.available {
@@ -397,40 +510,6 @@ struct MatchesScreen: View {
         }.padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 18))
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 18).fill(Palette.red).frame(width: 56, height: 56)
-                Image(systemName: "soccerball").font(.system(size: 30)).foregroundStyle(.white)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("ماجد لايف").font(.title.bold())
-                Text("كل مباراة… في مكان واحد").font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 4)
-            Text("تجريبي").font(.caption2.bold()).foregroundStyle(Palette.red)
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .background(Palette.red.opacity(0.09), in: Capsule())
-        }.padding(.vertical, 8)
-    }
-
-    @MainActor private func open(_ match: Match) async {
-        guard checkingMatch == nil else { return }
-        checkingMatch = match.id
-        defer { checkingMatch = nil }
-        do {
-            // Recheck availability on every tap; a previously published link can expire.
-            let fresh = try await model.api.load(date: match.date)
-            guard let current = fresh.first(where: { $0.id == match.id }), let url = current.playbackURL else {
-                message = "البث لم يُنشر في الموقع بعد. عندما يفعّله صاحب الموقع سيظهر زر المشاهدة تلقائيًا."
-                await model.refresh(offset: day)
-                return
-            }
-            playback = Playback(title: "\(current.home_team.name) × \(current.away_team.name)", url: url)
-        } catch {
-            message = "تعذّر التحقق من البث. تأكد من الإنترنت وحاول مجددًا."
-        }
-    }
 }
 
 struct RemoteLogo: View {
@@ -506,6 +585,13 @@ final class PlayerState: ObservableObject {
 struct PlayerScreen: View {
     let playback: Playback
     @StateObject private var state = PlayerState()
+    @State private var selectedID: String?
+    @State private var reloadID = UUID()
+    private var selected: StreamServer {
+        playback.servers.first(where: { $0.id == selectedID })
+            ?? playback.servers.first(where: { $0.is_default == true })
+            ?? playback.servers[0]
+    }
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 0) {
@@ -514,14 +600,22 @@ struct PlayerScreen: View {
                     .accessibilityLabel("إغلاق المشغّل")
                 Text(playback.title).font(.subheadline.bold()).lineLimit(1)
                 Spacer(minLength: 0)
-                Button { state.retry() } label: { Image(systemName: "arrow.clockwise").padding(12) }
+                Button { if selected.nativeVideo { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
                     .accessibilityLabel("تحديث المشغّل")
             }.foregroundStyle(.white).background(Color.black)
+            if playback.servers.count > 1 {
+                Picker("سيرفر البث", selection: Binding(get: { selected.id }, set: { selectedID = $0 })) {
+                    ForEach(playback.servers) { server in Text(server.name).tag(server.id) }
+                }.pickerStyle(.segmented).padding(10)
+            }
             ZStack {
-                PlayerWebView(url: playback.url, state: state)
-                if state.loading && state.error == nil {
+                if let url = selected.playbackURL {
+                    if selected.nativeVideo { NativeVideoPlayer(url: url).id("\(selected.id)-\(reloadID)") }
+                    else { PlayerWebView(url: url, referrer: playback.url, state: state).id(selected.id) }
+                }
+                if !selected.nativeVideo && state.loading && state.error == nil {
                     Color.black
-                    ProgressView("جاري فتح مشغّل الموقع…").tint(.white).foregroundStyle(.white)
+                    ProgressView("جاري تشغيل البث…").tint(.white).foregroundStyle(.white)
                 }
                 if let error = state.error {
                     Color.black
@@ -533,11 +627,23 @@ struct PlayerScreen: View {
                 }
             }
         }.background(Color.black).statusBarHidden()
+            .onChange(of: selectedID) { _ in state.error = nil; state.loading = true }
+    }
+}
+
+struct NativeVideoPlayer: View {
+    let url: URL
+    @State private var player: AVPlayer?
+    var body: some View {
+        VideoPlayer(player: player)
+            .onAppear { player = AVPlayer(url: url); player?.play() }
+            .onDisappear { player?.pause(); player = nil }
     }
 }
 
 struct PlayerWebView: UIViewRepresentable {
     let url: URL
+    let referrer: URL
     let state: PlayerState
     func makeCoordinator() -> Coordinator { Coordinator(url: url, state: state) }
     func makeUIView(context: Context) -> WKWebView {
@@ -555,8 +661,15 @@ struct PlayerWebView: UIViewRepresentable {
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = true
         state.webView = view
-        // Establish the normal website origin/cookies before following its published link.
-        view.load(URLRequest(url: Site.origin))
+        // Embed the published server alone, using its original watch page as the base.
+        let escaped = url.absoluteString.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "<", with: "&lt;")
+        view.scrollView.isScrollEnabled = false
+        view.loadHTMLString("""
+        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>html,body{margin:0;width:100%;height:100%;background:#000}iframe{width:100%;height:100%;border:0}</style>
+        </head><body><iframe src="\(escaped)" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></body></html>
+        """, baseURL: referrer)
         return view
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -569,31 +682,32 @@ struct PlayerWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let url: URL
         let state: PlayerState
-        var followedPublishedLink = false
         init(url: URL, state: PlayerState) { self.url = url; self.state = state }
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             state.loading = true
             state.error = nil
         }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            if !followedPublishedLink {
-                guard webView.url?.host == Site.origin.host else {
-                    state.loading = false
-                    return
-                }
-                followedPublishedLink = true
-                // Same navigation as the website's openMatch(), preserving the website referrer.
-                guard let encoded = try? JSONEncoder().encode(url.absoluteString),
-                      let target = String(data: encoded, encoding: .utf8) else {
-                    state.loading = false
-                    state.error = "تعذّر قراءة رابط المشغّل."
-                    return
-                }
-                webView.evaluateJavaScript("window.location.assign(\(target));", completionHandler: nil)
-            } else {
-                state.loading = false
-            }
+            state.loading = false
         }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            if let response = navigationResponse.response as? HTTPURLResponse, response.statusCode >= 400 {
+                state.loading = false
+                state.error = "سيرفر البث رفض التشغيل (\(response.statusCode)). يحتاج صاحب الموقع السماح للمشغّل بالعمل داخل التطبيق."
+                decisionHandler(.cancel)
+            } else { decisionHandler(.allow) }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .linkActivated,
+               navigationAction.request.url?.host != url.host {
+                decisionHandler(.cancel)
+            } else { decisionHandler(.allow) }
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
         private func failed(_ error: Error) {
@@ -607,11 +721,6 @@ struct PlayerWebView: UIViewRepresentable {
         }
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            // Keep user-opened player/server links inside the app. Ignore automatic popup windows.
-            if navigationAction.targetFrame == nil && navigationAction.navigationType == .linkActivated,
-               navigationAction.request.url?.scheme == "https" {
-                webView.load(navigationAction.request)
-            }
             return nil
         }
     }
