@@ -1,0 +1,56 @@
+name: MajedLive
+options:
+  bundleIdPrefix: com.majedlive.demo
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.1.0"
+targets:
+  MajedLive:
+    type: application
+    platform: iOS
+    sources:
+      - path: MajedLiveApp.swift
+      - path: Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.majedlive.demo.iphone
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: ماجد لايف
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        ITSAppUsesNonExemptEncryption: false
+  MajedLiveTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MajedLiveTests.swift
+    dependencies:
+      - target: MajedLive
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  MajedLive:
+    build:
+      targets:
+        MajedLive: all
+    test:
+      targets:
+        - MajedLiveTests

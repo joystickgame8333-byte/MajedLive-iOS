@@ -1,0 +1,8 @@
+build/
+Generated/
+*.xcodeproj/
+*.xcresult/
+*.ipa
+Payload/
+.DS_Store
+Assets.xcassets/
