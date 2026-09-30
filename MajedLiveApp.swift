@@ -413,7 +413,7 @@ struct PlayerWebView: UIViewRepresentable {
                 }
                 followedPublishedLink = true
                 // Same navigation as the website's openMatch(), preserving the website referrer.
-                webView.callAsyncJavaScript("window.location.assign(target)", arguments: ["target": url.absoluteString], in: nil, contentWorld: .page) { _ in }
+                webView.callAsyncJavaScript("window.location.assign(target)", arguments: ["target": url.absoluteString], in: nil, in: .page, completionHandler: { _ in })
             } else {
                 state.loading = false
             }
