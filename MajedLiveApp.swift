@@ -183,9 +183,94 @@ struct Playback: Identifiable {
     let url: URL
 }
 
+struct AppRelease: Decodable {
+    struct Asset: Decodable {
+        let name: String
+        let browser_download_url: URL
+    }
+    let tag_name: String
+    let draft: Bool
+    let prerelease: Bool
+    let assets: [Asset]
+    var build: Int? {
+        guard tag_name.hasPrefix("build-") else { return nil }
+        return Int(tag_name.dropFirst(6))
+    }
+    var ipa: URL? {
+        guard !draft, !prerelease,
+              let asset = assets.first(where: { $0.name == "MajedLive.ipa" }),
+              asset.browser_download_url.scheme == "https",
+              asset.browser_download_url.host == "github.com",
+              asset.browser_download_url.user == nil, asset.browser_download_url.password == nil,
+              asset.browser_download_url.path.hasPrefix("/joystickgame8333-byte/MajedLive-iOS/releases/download/"),
+              asset.browser_download_url.lastPathComponent == "MajedLive.ipa" else { return nil }
+        return asset.browser_download_url
+    }
+}
+
+@MainActor
+final class AppUpdates: ObservableObject {
+    @Published private(set) var available: AppRelease?
+    @Published private(set) var checking = false
+    @Published private(set) var installing = false
+    @Published var notice: String?
+    private var lastCheck: Date?
+    private let endpoint = URL(string: "https://api.github.com/repos/joystickgame8333-byte/MajedLive-iOS/releases/latest")!
+    let installedBuild = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1") ?? 1
+
+    func check(manual: Bool = false) async {
+        guard !checking else { return }
+        if !manual, let lastCheck, Date().timeIntervalSince(lastCheck) < 120 { return }
+        lastCheck = Date()
+        checking = true
+        defer { checking = false }
+        var request = URLRequest(url: endpoint)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("MajedLive-iOS", forHTTPHeaderField: "User-Agent")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 15
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard !Task.isCancelled else { return }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                if manual { notice = "تعذّر التحقق من التحديثات الآن. حاول لاحقًا." }
+                return
+            }
+            let release = try JSONDecoder().decode(AppRelease.self, from: data)
+            guard let build = release.build, release.ipa != nil else {
+                if manual { notice = "لم تتوفر نسخة صالحة للتحديث بعد." }
+                return
+            }
+            available = build > installedBuild ? release : nil
+            if manual && available == nil { notice = "أنت تستخدم أحدث نسخة متاحة." }
+        } catch {
+            if manual && !Task.isCancelled { notice = "تعذّر الاتصال بخدمة التحديثات. تحقق من الإنترنت وحاول مجددًا." }
+        }
+    }
+
+    func install() {
+        guard !installing, let ipa = available?.ipa else { return }
+        var components = URLComponents()
+        components.scheme = "apple-magnifier"
+        components.host = "install"
+        components.queryItems = [URLQueryItem(name: "url", value: ipa.absoluteString)]
+        guard let target = components.url else { return }
+        installing = true
+        // TrollStore handles the download and its own installation confirmation.
+        UIApplication.shared.open(target, options: [:]) { [weak self] opened in
+            Task { @MainActor in
+                guard let self else { return }
+                self.installing = false
+                if !opened { self.notice = "تعذّر فتح TrollStore. فعّل URL Scheme من إعداداته ثم أعد المحاولة." }
+            }
+        }
+    }
+}
+
 struct MatchesScreen: View {
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
     @StateObject private var model = ScheduleModel()
+    @StateObject private var updates = AppUpdates()
     @State private var day = 0
     @State private var playback: Playback?
     @State private var checkingMatch: String?
@@ -198,6 +283,7 @@ struct MatchesScreen: View {
                 VStack(alignment: .leading, spacing: 22) {
                     header
                     appearancePicker
+                    updateControls
                     Picker("اختيار اليوم", selection: $day) {
                         Text("اليوم").tag(0)
                         Text("غدًا").tag(1)
@@ -249,10 +335,12 @@ struct MatchesScreen: View {
             .refreshable { await model.refresh(offset: day) }
             .task(id: "\(day)-\(scenePhase == .active)-\(playback == nil)") {
                 guard scenePhase == .active, playback == nil else { return }
+                Task { await updates.check() }
                 await model.refresh(offset: day)
                 while !Task.isCancelled {
                     do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
                     await model.refresh(offset: day)
+                    Task { await updates.check() }
                 }
             }
             .onChange(of: day) { _ in model.matches = []; model.updated = nil }
@@ -260,7 +348,34 @@ struct MatchesScreen: View {
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
             } message: { Text(message ?? "") }
+            .alert("تحديث التطبيق", isPresented: Binding(get: { updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
+                Button("حسنًا", role: .cancel) { updates.notice = nil }
+            } message: { Text(updates.notice ?? "") }
         }
+    }
+
+    private var updateControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let release = updates.available {
+                Label("نسخة جديدة جاهزة · \(release.build ?? 0)", systemImage: "arrow.down.circle.fill")
+                    .font(.headline)
+                Text("اضغط تحديث، ثم أكمل التثبيت في TrollStore. إذا ظهر تطبيق المكبّر، فعّل URL Scheme من إعدادات TrollStore.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button { updates.install() } label: {
+                    Label(updates.installing ? "جاري فتح TrollStore…" : "تحديث عبر TrollStore", systemImage: "arrow.down.app.fill")
+                        .font(.subheadline.bold()).frame(maxWidth: .infinity).padding(12)
+                        .background(Palette.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                }.disabled(updates.installing)
+            }
+            HStack {
+                Text("النسخة المثبتة: \(updates.installedBuild)").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button { Task { await updates.check(manual: true) } } label: {
+                    if updates.checking { ProgressView() }
+                    else { Label("فحص التحديثات", systemImage: "arrow.clockwise") }
+                }.font(.caption).disabled(updates.checking)
+            }
+        }.padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var appearancePicker: some View {
