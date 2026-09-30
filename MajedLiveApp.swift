@@ -413,7 +413,13 @@ struct PlayerWebView: UIViewRepresentable {
                 }
                 followedPublishedLink = true
                 // Same navigation as the website's openMatch(), preserving the website referrer.
-                webView.callAsyncJavaScript("window.location.assign(target)", arguments: ["target": url.absoluteString], in: nil, in: .page, completionHandler: { _ in })
+                guard let encoded = try? JSONEncoder().encode(url.absoluteString),
+                      let target = String(data: encoded, encoding: .utf8) else {
+                    state.loading = false
+                    state.error = "تعذّر قراءة رابط المشغّل."
+                    return
+                }
+                webView.evaluateJavaScript("window.location.assign(\(target));", completionHandler: nil)
             } else {
                 state.loading = false
             }
