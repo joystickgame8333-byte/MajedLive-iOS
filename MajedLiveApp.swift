@@ -1,19 +1,53 @@
 import SwiftUI
 import WebKit
+import UIKit
 
 @main
 struct MajedLiveApp: App {
+    @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
+
     var body: some Scene {
         WindowGroup {
             MatchesScreen()
                 .environment(\.layoutDirection, .rightToLeft)
                 .tint(Palette.red)
+                .preferredColorScheme(Appearance(rawValue: appearance)?.colorScheme)
+        }
+    }
+}
+
+enum Appearance: String, CaseIterable, Identifiable {
+    case automatic, light, dark
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .automatic: return "تلقائي حسب الآيفون"
+        case .light: return "نهاري"
+        case .dark: return "ليلي"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .automatic: return "circle.lefthalf.filled"
+        case .light: return "sun.max.fill"
+        case .dark: return "moon.fill"
+        }
+    }
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .automatic: return nil
+        case .light: return .light
+        case .dark: return .dark
         }
     }
 }
 
 enum Palette {
-    static let red = Color(red: 0.65, green: 0.06, blue: 0.18)
+    static let red = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 1, green: 0.40, blue: 0.52, alpha: 1)
+            : UIColor(red: 0.65, green: 0.06, blue: 0.18, alpha: 1)
+    })
     static let background = Color(uiColor: .systemGroupedBackground)
     static let card = Color(uiColor: .secondarySystemGroupedBackground)
 }
@@ -150,6 +184,7 @@ struct Playback: Identifiable {
 }
 
 struct MatchesScreen: View {
+    @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
     @StateObject private var model = ScheduleModel()
     @State private var day = 0
     @State private var playback: Playback?
@@ -162,6 +197,7 @@ struct MatchesScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
+                    appearancePicker
                     Picker("اختيار اليوم", selection: $day) {
                         Text("اليوم").tag(0)
                         Text("غدًا").tag(1)
@@ -224,6 +260,27 @@ struct MatchesScreen: View {
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
             } message: { Text(message ?? "") }
+        }
+    }
+
+    private var appearancePicker: some View {
+        let selected = Appearance(rawValue: appearance) ?? .automatic
+        return HStack {
+            Text("مظهر التطبيق").font(.subheadline).foregroundStyle(.secondary)
+            Spacer()
+            Menu {
+                Picker("مظهر التطبيق", selection: $appearance) {
+                    ForEach(Appearance.allCases) { option in
+                        Label(option.title, systemImage: option.symbol).tag(option.rawValue)
+                    }
+                }
+            } label: {
+                Label(selected.title, systemImage: selected.symbol)
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .background(Palette.card, in: Capsule())
+            }
+            .accessibilityLabel("مظهر التطبيق: \(selected.title)")
         }
     }
 
