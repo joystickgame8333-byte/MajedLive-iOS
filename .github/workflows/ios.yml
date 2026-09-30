@@ -3,20 +3,73 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_simulator_checks:
+        description: Run simulator tests and capture a preview separately
+        type: boolean
+        default: false
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: iphone-demo-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 25
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@v4
       - name: Generate Xcode project
         run: |
-          brew install xcodegen
+          command -v xcodegen >/dev/null || brew install xcodegen
+          bash generate-project.sh
+      - name: Build unsigned iPhone app
+        run: |
+          xcodebuild build -project MajedLive.xcodeproj -scheme MajedLive \
+            -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
+            -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
+          mkdir -p build/package/Payload
+          cp -R build/device/Build/Products/Release-iphoneos/MajedLive.app build/package/Payload/
+          cd build/package
+          zip -qr ../MajedLive.ipa Payload
+      - name: Publish direct IPA for TrollStore updates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG="build-$GITHUB_RUN_NUMBER"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/MajedLive.ipa --clobber
+          else
+            gh release create "$RELEASE_TAG" build/MajedLive.ipa \
+              --target "$GITHUB_SHA" --title "MajedLive demo $GITHUB_RUN_NUMBER" \
+              --notes "نسخة تجريبية لماجد لايف. يمكن تثبيتها وتحديثها باستخدام TrollStore." --latest
+          fi
+      - name: Upload IPA archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: MajedLive-unsigned-IPA
+          path: build/MajedLive.ipa
+          if-no-files-found: error
+          retention-days: 14
+  simulator-checks:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_simulator_checks }}
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Xcode project
+        run: |
+          command -v xcodegen >/dev/null || brew install xcodegen
           bash generate-project.sh
       - name: Choose available iPhone simulator
         run: |
@@ -36,34 +89,6 @@ jobs:
           xcrun simctl launch "$SIMULATOR_ID" com.majedlive.demo.iphone
           sleep 12
           xcrun simctl io "$SIMULATOR_ID" screenshot build/iPhone-preview.png
-      - name: Build unsigned iPhone app
-        run: |
-          xcodebuild build -project MajedLive.xcodeproj -scheme MajedLive \
-            -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
-            -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
-          mkdir -p build/package/Payload
-          cp -R build/device/Build/Products/Release-iphoneos/MajedLive.app build/package/Payload/
-          cd build/package
-          zip -qr ../MajedLive.ipa Payload
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: MajedLive-unsigned-IPA
-          path: build/MajedLive.ipa
-          if-no-files-found: error
-          retention-days: 14
-      - name: Publish direct IPA for TrollStore updates
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          RELEASE_TAG="build-$GITHUB_RUN_NUMBER"
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" build/MajedLive.ipa --clobber
-          else
-            gh release create "$RELEASE_TAG" build/MajedLive.ipa \
-              --target "$GITHUB_SHA" --title "MajedLive demo $GITHUB_RUN_NUMBER" \
-              --notes "نسخة تجريبية لماجد لايف. يمكن تثبيتها وتحديثها باستخدام TrollStore." --latest
-          fi
       - name: Upload iPhone preview
         uses: actions/upload-artifact@v4
         with:
