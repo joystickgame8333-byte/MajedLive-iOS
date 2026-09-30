@@ -1,0 +1,65 @@
+name: Build iPhone demo
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: iphone-demo-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          bash generate-project.sh
+      - name: Choose available iPhone simulator
+        run: |
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; devices=json.load(sys.stdin)["devices"]; print(next(d["udid"] for rows in devices.values() for d in rows if "iPhone" in d["name"]))')
+          echo "SIMULATOR_ID=$SIMULATOR_ID" >> "$GITHUB_ENV"
+      - name: Run availability and date tests
+        run: |
+          xcodebuild test -project MajedLive.xcodeproj -scheme MajedLive \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -derivedDataPath build/simulator -resultBundlePath build/Tests.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Capture native iPhone screen
+        run: |
+          xcrun simctl boot "$SIMULATOR_ID" || true
+          xcrun simctl bootstatus "$SIMULATOR_ID" -b
+          xcrun simctl install "$SIMULATOR_ID" build/simulator/Build/Products/Debug-iphonesimulator/MajedLive.app
+          xcrun simctl launch "$SIMULATOR_ID" com.majedlive.demo.iphone
+          sleep 12
+          xcrun simctl io "$SIMULATOR_ID" screenshot build/iPhone-preview.png
+      - name: Build unsigned iPhone app
+        run: |
+          xcodebuild build -project MajedLive.xcodeproj -scheme MajedLive \
+            -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
+            -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO
+          mkdir -p build/package/Payload
+          cp -R build/device/Build/Products/Release-iphoneos/MajedLive.app build/package/Payload/
+          cd build/package
+          zip -qr ../MajedLive.ipa Payload
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: MajedLive-unsigned-IPA
+          path: build/MajedLive.ipa
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload iPhone preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: MajedLive-iPhone-preview
+          path: build/iPhone-preview.png
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MajedLive-tests
+          path: build/Tests.xcresult
