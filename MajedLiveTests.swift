@@ -2,12 +2,16 @@ import XCTest
 @testable import MajedLive
 
 final class MajedLiveTests: XCTestCase {
-    private func match(ready: Bool = true, available: Bool = true, enabled: Bool = true, url: String = "https://majed-koora.live/watch.html?id=42") throws -> Match {
-        let payload: [String: Any] = [
-            "id": "42", "date": "2026-09-30", "time": "19:00", "state": "upcoming",
-            "home_team": ["name": "الأول"], "away_team": ["name": "الثاني"], "tournament": ["name": "البطولة"],
+    private func match(ready: Bool = true, available: Bool = true, enabled: Bool = true, url: String = "https://majed-koora.live/watch.html?id=42", state: String = "upcoming", elapsed: Int? = nil, syncedAt: Double? = nil, leagueID: String = "cup1", homeScore: Int? = nil, awayScore: Int? = nil) throws -> Match {
+        var payload: [String: Any] = [
+            "id": "42", "date": "2026-09-30", "time": "19:00", "state": state,
+            "home_team": ["name": "الأول"], "away_team": ["name": "الثاني"], "tournament": ["id": leagueID, "name": "البطولة"],
             "watch_ready": ready, "watch_available": available, "site_watch_enabled": enabled, "watch_url": url
         ]
+        if let elapsed { payload["elapsed_seconds"] = elapsed }
+        if let syncedAt { payload["clock_synced_at"] = syncedAt }
+        if let homeScore { payload["home_team"] = ["name": "الأول", "score": homeScore] }
+        if let awayScore { payload["away_team"] = ["name": "الثاني", "score": awayScore] }
         return try JSONDecoder().decode(Match.self, from: JSONSerialization.data(withJSONObject: payload))
     }
     func testNoPublishedBroadcastHasNoPlayerURL() throws {
@@ -33,4 +37,24 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(Site.media("/media/teams/logo.png")?.absoluteString, "https://majed-koora.live/media/teams/logo.png")
         XCTAssertNil(Site.media(""))
     }
+    func testLiveClockUsesPublishedSyncAndStopsAtHalftime() throws {
+        let now = Date(timeIntervalSince1970: 110)
+        XCTAssertEqual(try match(state: "live", elapsed: 3590, syncedAt: 100000).clockText(now: now), "60:00")
+        XCTAssertEqual(try match(state: "halftime", elapsed: 3590, syncedAt: 100000).clockText(now: now), "59:50")
+        XCTAssertEqual(try match(state: "live", elapsed: 3590, syncedAt: 120000).clockText(now: now), "59:50")
+        XCTAssertNil(try match(state: "live").clockText(now: now))
+        XCTAssertNil(try match(elapsed: 0).clockText(now: now))
+    }
+    func testLeagueFilterUsesIDsAndSupportsAllAndEmptyDays() throws {
+        let first = try match(leagueID: "cup1")
+        let second = try match(leagueID: "cup2")
+        XCTAssertEqual(LeagueFilter.matches([first, second], selected: LeagueFilter.all).count, 2)
+        XCTAssertEqual(LeagueFilter.matches([first, second], selected: "id:cup1").count, 1)
+        XCTAssertEqual(LeagueFilter.matches([second], selected: "id:cup1").count, 0)
+    }
+    func testScoresPreserveRealGoalsAndDoNotInventMissingGoals() throws {
+        XCTAssertEqual(try match(state: "live", homeScore: 0, awayScore: 4).scoreText, "0 : 4")
+        XCTAssertEqual(try match(state: "live").scoreText, "— : —")
+    }
+
 }

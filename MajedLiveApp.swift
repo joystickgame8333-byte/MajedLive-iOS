@@ -142,6 +142,8 @@ struct Team: Decodable {
 }
 
 struct Competition: Decodable {
+    let id: String?
+    var filterKey: String { id.map { "id:" + $0 } ?? "name:" + name }
     let name: String
     let logo: String?
 }
@@ -152,6 +154,9 @@ struct Match: Decodable, Identifiable {
     let time: String
     let state: String
     let state_text: String?
+    let elapsed_seconds: Int?
+    let clock_synced_at: Double?
+    let added_minutes: Int?
     let home_team: Team
     let away_team: Team
     let tournament: Competition
@@ -171,6 +176,28 @@ struct Match: Decodable, Identifiable {
     }
     var isLive: Bool { state == "live" || state == "halftime" }
     var hasScore: Bool { isLive || state == "finished" }
+    var scoreText: String {
+        let home = home_team.score.map(String.init) ?? "—"
+        let away = away_team.score.map(String.init) ?? "—"
+        return "\(home) : \(away)"
+    }
+    func clockText(now: Date = Date()) -> String? {
+        guard isLive, let elapsed = elapsed_seconds else { return nil }
+        let delta: Int
+        if state == "live", let synced = clock_synced_at, synced > 0 {
+            delta = Int(max(0, now.timeIntervalSince1970 - synced / 1000))
+        } else { delta = 0 }
+        let seconds = max(0, elapsed) + delta
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+
+}
+
+enum LeagueFilter {
+    static let all = "__all__"
+    static func matches(_ matches: [Match], selected: String) -> [Match] {
+        selected == all ? matches : matches.filter { $0.tournament.filterKey == selected }
+    }
 }
 
 struct MatchesResponse: Decodable {
@@ -385,6 +412,8 @@ struct MatchesScreen: View {
     private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
     @StateObject private var model = ScheduleModel()
     @StateObject private var updates = AppUpdates()
+    @AppStorage("selectedLeague") private var selectedLeague = LeagueFilter.all
+    @AppStorage("selectedLeagueTitle") private var selectedLeagueTitle = "كل الدوريات"
     @State private var showingSettings = false
     @State private var day = 0
     @State private var playback: Playback?
@@ -392,22 +421,29 @@ struct MatchesScreen: View {
     @State private var message: String?
     @Environment(\.scenePhase) private var scenePhase
 
+    private var filteredMatches: [Match] { LeagueFilter.matches(model.matches, selected: selectedLeague) }
+    private var leagues: [Competition] {
+        var seen = Set<String>()
+        return model.matches.map(\.tournament).filter { seen.insert($0.filterKey).inserted }
+            .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    header
                     Picker("اختيار اليوم", selection: $day) {
                         Text("اليوم").tag(0)
                         Text("غدًا").tag(1)
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("dayPicker")
+                    leaguePicker
                     HStack {
                         Text(day == 0 ? "مباريات اليوم" : "مباريات غدًا")
                             .font(.title2.bold())
                         Spacer()
-                        Text("\(model.matches.count) مباريات")
+                        Text("\(filteredMatches.count) مباريات")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if let error = model.error {
@@ -420,30 +456,33 @@ struct MatchesScreen: View {
                     if model.loading && model.matches.isEmpty {
                         ProgressView("جاري تحميل المباريات…")
                             .frame(maxWidth: .infinity).padding(.vertical, 60)
-                    } else if model.matches.isEmpty && model.error == nil {
+                    } else if filteredMatches.isEmpty && model.error == nil {
                         VStack(spacing: 14) {
                             Image(systemName: "sportscourt").font(.largeTitle).foregroundStyle(colors.accent)
-                            Text("لا توجد مباريات لهذا اليوم").font(.headline)
+                            Text(selectedLeague == LeagueFilter.all ? "لا توجد مباريات لهذا اليوم" : "لا توجد مباريات لهذا الدوري اليوم").font(.headline)
                             Text("اسحب للأسفل لتحديث الجدول").font(.subheadline).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity).padding(.vertical, 55)
                     } else {
                         LazyVStack(spacing: 16) {
-                            ForEach(model.matches) { match in
+                            ForEach(filteredMatches) { match in
                                 MatchCard(match: match, checking: checkingMatch == match.id) {
                                     Task { await open(match) }
                                 }.disabled(checkingMatch != nil)
                             }
                         }
                     }
-                    VStack(spacing: 6) {
-                        Text("مواعيد المباريات بتوقيت الرياض")
-                        if let updated = model.updated {
-                            Text("آخر تحديث: \(updated.formatted(date: .omitted, time: .shortened))")
-                        }
-                    }.font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 12)
+                    if let updated = model.updated {
+                        Text("آخر تحديث: \(updated.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 12)
+                    }
                 }.padding(20)
             }
             .background(colors.background)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                header.padding(.horizontal, 20)
+                    .background(colors.card.ignoresSafeArea(edges: .top))
+                    .overlay(alignment: .bottom) { Rectangle().fill(colors.accent.opacity(0.12)).frame(height: 1) }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if updates.available != nil {
                     HStack(spacing: 10) {
@@ -487,15 +526,38 @@ struct MatchesScreen: View {
         }
     }
 
+    private var leaguePicker: some View {
+        Menu {
+            Button { selectedLeague = LeagueFilter.all; selectedLeagueTitle = "كل الدوريات" } label: {
+                if selectedLeague == LeagueFilter.all { Label("إظهار الكل", systemImage: "checkmark") }
+                else { Text("إظهار الكل") }
+            }
+            ForEach(leagues, id: \.filterKey) { league in
+                Button { selectedLeague = league.filterKey; selectedLeagueTitle = league.name } label: {
+                    if selectedLeague == league.filterKey { Label(league.name, systemImage: "checkmark") }
+                    else { Text(league.name) }
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "line.3.horizontal.decrease.circle").foregroundStyle(colors.accent)
+                Text(selectedLeague == LeagueFilter.all ? "كل الدوريات" : selectedLeagueTitle)
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.primary).lineLimit(2)
+                Spacer()
+                Image(systemName: "chevron.down").font(.caption.bold()).foregroundStyle(.secondary)
+            }.padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 14))
+        }.accessibilityLabel("اختيار الدوري")
+            .accessibilityIdentifier("leaguePicker")
+    }
+
     private var header: some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 18).fill(colors.accent).frame(width: 56, height: 56)
-                Image(systemName: "soccerball").font(.system(size: 30)).foregroundStyle(.white)
+                RoundedRectangle(cornerRadius: 12).fill(colors.accent).frame(width: 40, height: 40)
+                Image(systemName: "soccerball").font(.system(size: 23)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("ماجد لايف").font(.title.bold())
-                Text("كل مباراة… في مكان واحد").font(.caption).foregroundStyle(.secondary)
+                Text("ماجد لايف").font(.title3.bold())
             }
             Spacer(minLength: 4)
             Button { showingSettings = true } label: {
@@ -660,13 +722,30 @@ struct MatchCard: View {
                 team(match.home_team)
                 VStack(spacing: 6) {
                     if match.hasScore {
-                        Text("\(match.home_team.score ?? 0) : \(match.away_team.score ?? 0)")
-                            .font(.title2.bold()).monospacedDigit().environment(\.layoutDirection, .leftToRight)
+                        HStack(spacing: 8) {
+                            Text(match.home_team.score.map { String($0) } ?? "—")
+                            Text(":")
+                            Text(match.away_team.score.map { String($0) } ?? "—")
+                        }.font(.title2.bold()).monospacedDigit()
+                        Text("الأهداف").font(.caption2).foregroundStyle(.secondary)
                     } else { Text(match.time).font(.title2.bold()).monospacedDigit() }
                     Text(match.state_text ?? "لم تبدأ").font(.caption2).foregroundStyle(.secondary)
-                }.frame(width: 100)
+                    if match.isLive {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            if let clock = match.clockText(now: context.date) {
+                                Text("الدقيقة " + clock).font(.caption.bold()).monospacedDigit()
+                                    .foregroundStyle(colors.accent)
+                            }
+                        }
+                        if let added = match.added_minutes, added > 0 {
+                            Text("+\(added) بدل ضائع").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }.frame(width: 112)
                 team(match.away_team)
             }
+            Label("وقت البداية: " + match.time, systemImage: "clock")
+                .font(.caption).foregroundStyle(.secondary)
             Button(action: action) {
                 HStack(spacing: 8) {
                     if checking { ProgressView().tint(match.playbackURL == nil ? colors.accent : .white) }
