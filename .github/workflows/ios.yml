@@ -4,7 +4,7 @@ on:
     branches: [main]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: iphone-demo-${{ github.ref }}
   cancel-in-progress: true
@@ -27,7 +27,7 @@ jobs:
           xcodebuild test -project MajedLive.xcodeproj -scheme MajedLive \
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -derivedDataPath build/simulator -resultBundlePath build/Tests.xcresult \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
       - name: Capture native iPhone screen
         run: |
           xcrun simctl boot "$SIMULATOR_ID" || true
@@ -40,7 +40,7 @@ jobs:
         run: |
           xcodebuild build -project MajedLive.xcodeproj -scheme MajedLive \
             -configuration Release -sdk iphoneos -destination "generic/platform=iOS" \
-            -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO
+            -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER"
           mkdir -p build/package/Payload
           cp -R build/device/Build/Products/Release-iphoneos/MajedLive.app build/package/Payload/
           cd build/package
@@ -52,6 +52,18 @@ jobs:
           path: build/MajedLive.ipa
           if-no-files-found: error
           retention-days: 14
+      - name: Publish direct IPA for TrollStore updates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG="build-$GITHUB_RUN_NUMBER"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/MajedLive.ipa --clobber
+          else
+            gh release create "$RELEASE_TAG" build/MajedLive.ipa \
+              --target "$GITHUB_SHA" --title "MajedLive demo $GITHUB_RUN_NUMBER" \
+              --notes "نسخة تجريبية لماجد لايف. يمكن تثبيتها وتحديثها باستخدام TrollStore." --latest
+          fi
       - name: Upload iPhone preview
         uses: actions/upload-artifact@v4
         with:
