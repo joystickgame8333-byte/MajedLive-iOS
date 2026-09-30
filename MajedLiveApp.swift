@@ -6,12 +6,15 @@ import AVKit
 @main
 struct MajedLiveApp: App {
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
+    @AppStorage("theme") private var themeName = AppTheme.ruby.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .ruby }
 
     var body: some Scene {
         WindowGroup {
             MatchesScreen()
                 .environment(\.layoutDirection, .rightToLeft)
-                .tint(Palette.red)
+                .environment(\.appTheme, theme)
+                .tint(theme.accent)
                 .preferredColorScheme(Appearance(rawValue: appearance)?.colorScheme)
         }
     }
@@ -43,14 +46,67 @@ enum Appearance: String, CaseIterable, Identifiable {
     }
 }
 
-enum Palette {
-    static let red = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 1, green: 0.40, blue: 0.52, alpha: 1)
-            : UIColor(red: 0.65, green: 0.06, blue: 0.18, alpha: 1)
-    })
-    static let background = Color(uiColor: .systemGroupedBackground)
-    static let card = Color(uiColor: .secondarySystemGroupedBackground)
+enum AppTheme: String, CaseIterable, Identifiable {
+    case ruby, ocean, emerald
+    var id: String { rawValue }
+    var title: String {
+        switch self { case .ruby: return "عنابي"; case .ocean: return "أزرق"; case .emerald: return "زمردي" }
+    }
+    private func color(_ hex: UInt32) -> UIColor {
+        UIColor(red: CGFloat((hex >> 16) & 255) / 255,
+                green: CGFloat((hex >> 8) & 255) / 255,
+                blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
+    var accent: Color {
+        Color(uiColor: UIColor { traits in
+            let dark = traits.userInterfaceStyle == .dark
+            switch self {
+            case .ruby: return self.color(dark ? 0xFF6685 : 0xA60F2E)
+            case .ocean: return self.color(dark ? 0x70B9FF : 0x185BA6)
+            case .emerald: return self.color(dark ? 0x65DDB4 : 0x067452)
+            }
+        })
+    }
+    func accent(dark: Bool) -> Color {
+        switch self {
+        case .ruby: return Color(uiColor: color(dark ? 0xFF6685 : 0xA60F2E))
+        case .ocean: return Color(uiColor: color(dark ? 0x70B9FF : 0x185BA6))
+        case .emerald: return Color(uiColor: color(dark ? 0x65DDB4 : 0x067452))
+        }
+    }
+    func background(dark: Bool) -> Color {
+        switch self {
+        case .ruby: return Color(uiColor: color(dark ? 0x120E12 : 0xFCF4F5))
+        case .ocean: return Color(uiColor: color(dark ? 0x0B1420 : 0xF1F6FD))
+        case .emerald: return Color(uiColor: color(dark ? 0x0B1915 : 0xF0F8F4))
+        }
+    }
+    func card(dark: Bool) -> Color {
+        switch self {
+        case .ruby: return Color(uiColor: color(dark ? 0x251B23 : 0xFFFFFF))
+        case .ocean: return Color(uiColor: color(dark ? 0x182638 : 0xFFFFFF))
+        case .emerald: return Color(uiColor: color(dark ? 0x192D25 : 0xFFFFFF))
+        }
+    }
+}
+
+private struct AppThemeKey: EnvironmentKey {
+    static let defaultValue = AppTheme.ruby
+}
+
+extension EnvironmentValues {
+    var appTheme: AppTheme {
+        get { self[AppThemeKey.self] }
+        set { self[AppThemeKey.self] = newValue }
+    }
+}
+
+struct ThemeColors {
+    let theme: AppTheme
+    let dark: Bool
+    var accent: Color { theme.accent(dark: dark) }
+    var background: Color { theme.background(dark: dark) }
+    var card: Color { theme.card(dark: dark) }
 }
 
 enum Site {
@@ -324,6 +380,9 @@ final class AppUpdates: ObservableObject {
 }
 
 struct MatchesScreen: View {
+    @Environment(\.appTheme) private var appTheme
+    @Environment(\.colorScheme) private var colorScheme
+    private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
     @StateObject private var model = ScheduleModel()
     @StateObject private var updates = AppUpdates()
     @State private var showingSettings = false
@@ -356,14 +415,14 @@ struct MatchesScreen: View {
                             Label(error, systemImage: "wifi.exclamationmark")
                             Button("إعادة المحاولة") { Task { await model.refresh(offset: day) } }
                         }.font(.subheadline).padding().frame(maxWidth: .infinity)
-                            .background(Palette.card, in: RoundedRectangle(cornerRadius: 20))
+                            .background(colors.card, in: RoundedRectangle(cornerRadius: 20))
                     }
                     if model.loading && model.matches.isEmpty {
                         ProgressView("جاري تحميل المباريات…")
                             .frame(maxWidth: .infinity).padding(.vertical, 60)
                     } else if model.matches.isEmpty && model.error == nil {
                         VStack(spacing: 14) {
-                            Image(systemName: "sportscourt").font(.largeTitle).foregroundStyle(Palette.red)
+                            Image(systemName: "sportscourt").font(.largeTitle).foregroundStyle(colors.accent)
                             Text("لا توجد مباريات لهذا اليوم").font(.headline)
                             Text("اسحب للأسفل لتحديث الجدول").font(.subheadline).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity).padding(.vertical, 55)
@@ -384,7 +443,25 @@ struct MatchesScreen: View {
                     }.font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 12)
                 }.padding(20)
             }
-            .background(Palette.background)
+            .background(colors.background)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if updates.available != nil {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.down.circle.fill").foregroundStyle(colors.accent)
+                        Text("تحديث جديد متاح").font(.subheadline.weight(.medium))
+                        Spacer(minLength: 8)
+                        Button { updates.install() } label: {
+                            if updates.installing { ProgressView() }
+                            else { Text("تحديث").font(.subheadline.bold()) }
+                        }.disabled(updates.installing)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                    .background(colors.card, in: RoundedRectangle(cornerRadius: 16))
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(colors.accent.opacity(0.2), lineWidth: 1))
+                    .padding(.horizontal, 20).padding(.vertical, 8)
+                    .background(colors.background)
+                }
+            }
             .toolbar(.hidden, for: .navigationBar)
             .refreshable { await model.refresh(offset: day) }
             .task(id: "\(day)-\(scenePhase == .active)-\(playback == nil)") {
@@ -403,6 +480,9 @@ struct MatchesScreen: View {
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
             } message: { Text(message ?? "") }
+            .alert("تحديث التطبيق", isPresented: Binding(get: { !showingSettings && updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
+                Button("حسنًا", role: .cancel) { updates.notice = nil }
+            } message: { Text(updates.notice ?? "") }
 
         }
     }
@@ -410,7 +490,7 @@ struct MatchesScreen: View {
     private var header: some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 18).fill(Palette.red).frame(width: 56, height: 56)
+                RoundedRectangle(cornerRadius: 18).fill(colors.accent).frame(width: 56, height: 56)
                 Image(systemName: "soccerball").font(.system(size: 30)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -422,7 +502,7 @@ struct MatchesScreen: View {
                 Image(systemName: "gearshape").font(.title3).padding(10)
                     .overlay(alignment: .topTrailing) {
                         if updates.available != nil {
-                            Circle().fill(Palette.red).frame(width: 8, height: 8)
+                            Circle().fill(colors.accent).frame(width: 8, height: 8)
                         }
                     }
             }.accessibilityLabel(updates.available == nil ? "الإعدادات" : "الإعدادات، تحديث جديد متاح")
@@ -450,15 +530,19 @@ struct MatchesScreen: View {
 }
 
 struct SettingsScreen: View {
+    @Environment(\.appTheme) private var appTheme
+    @Environment(\.colorScheme) private var colorScheme
+    private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
     @ObservedObject var updates: AppUpdates
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
+    @AppStorage("theme") private var themeName = AppTheme.ruby.rawValue
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 20) { appearancePicker; updateControls }.padding(20)
+                VStack(spacing: 20) { appearancePicker; themePicker; updateControls }.padding(20)
             }
-            .background(Palette.background)
+            .background(colors.background)
             .navigationTitle("الإعدادات")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("تم") { dismiss() } } }
@@ -467,6 +551,36 @@ struct SettingsScreen: View {
             } message: { Text(updates.notice ?? "") }
         }
     }
+    private var themePicker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("ألوان التطبيق").font(.headline)
+            Text("كل نمط له مظهر نهاري وليلي؛ اختيارك محفوظ.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(AppTheme.allCases) { option in
+                Button { themeName = option.rawValue } label: {
+                    HStack(spacing: 12) {
+                        ForEach([false, true], id: \.self) { dark in
+                            VStack(spacing: 6) {
+                                Image(systemName: dark ? "moon.fill" : "sun.max.fill")
+                                    .font(.caption).foregroundStyle(option.accent(dark: dark))
+                                RoundedRectangle(cornerRadius: 3).fill(option.card(dark: dark))
+                                    .frame(width: 28, height: 8)
+                            }.frame(width: 46, height: 44)
+                                .background(option.background(dark: dark), in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        Text(option.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                        Spacer(minLength: 8)
+                        Image(systemName: themeName == option.rawValue ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(themeName == option.rawValue ? colors.accent : Color.secondary)
+                    }.padding(10)
+                        .background(colors.accent.opacity(themeName == option.rawValue ? 0.09 : 0), in: RoundedRectangle(cornerRadius: 14))
+                }.buttonStyle(.plain)
+                    .accessibilityLabel("نمط " + option.title)
+                    .accessibilityValue(themeName == option.rawValue ? "محدد" : "غير محدد")
+            }
+        }.padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 18))
+    }
+
     private var updateControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let release = updates.available {
@@ -477,7 +591,7 @@ struct SettingsScreen: View {
                 Button { updates.install() } label: {
                     Label(updates.installing ? "جاري فتح TrollStore…" : "تحديث عبر TrollStore", systemImage: "arrow.down.app.fill")
                         .font(.subheadline.bold()).frame(maxWidth: .infinity).padding(12)
-                        .background(Palette.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                        .background(colors.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
                 }.disabled(updates.installing)
             }
             HStack {
@@ -488,7 +602,7 @@ struct SettingsScreen: View {
                     else { Label("فحص التحديثات", systemImage: "arrow.clockwise") }
                 }.font(.caption).disabled(updates.checking)
             }
-        }.padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 18))
+        }.padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var appearancePicker: some View {
@@ -507,7 +621,7 @@ struct SettingsScreen: View {
             }
             .pickerStyle(.segmented)
             .accessibilityIdentifier("appearancePicker")
-        }.padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 18))
+        }.padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 18))
     }
 
 }
@@ -525,6 +639,9 @@ struct RemoteLogo: View {
 }
 
 struct MatchCard: View {
+    @Environment(\.appTheme) private var appTheme
+    @Environment(\.colorScheme) private var colorScheme
+    private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
     let match: Match
     let checking: Bool
     let action: () -> Void
@@ -536,7 +653,7 @@ struct MatchCard: View {
                 Spacer(minLength: 0)
                 if match.isLive {
                     Label("مباشر", systemImage: "dot.radiowaves.left.and.right")
-                        .font(.caption2.bold()).foregroundStyle(Palette.red)
+                        .font(.caption2.bold()).foregroundStyle(colors.accent)
                 }
             }
             HStack(alignment: .center, spacing: 8) {
@@ -552,15 +669,15 @@ struct MatchCard: View {
             }
             Button(action: action) {
                 HStack(spacing: 8) {
-                    if checking { ProgressView().tint(match.playbackURL == nil ? Palette.red : .white) }
+                    if checking { ProgressView().tint(match.playbackURL == nil ? colors.accent : .white) }
                     else { Image(systemName: match.playbackURL == nil ? "clock" : "play.fill") }
                     Text(checking ? "جاري التحقق…" : match.playbackURL == nil ? "البث لم يُنشر بعد" : "مشاهدة البث")
                         .font(.subheadline.bold())
                 }.frame(maxWidth: .infinity).padding(.vertical, 13)
-                    .foregroundStyle(match.playbackURL == nil ? Palette.red : .white)
-                    .background(match.playbackURL == nil ? Palette.red.opacity(0.08) : Palette.red, in: RoundedRectangle(cornerRadius: 13))
+                    .foregroundStyle(match.playbackURL == nil ? colors.accent : .white)
+                    .background(match.playbackURL == nil ? colors.accent.opacity(0.08) : colors.accent, in: RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain).accessibilityIdentifier("watch-\(match.id)")
-        }.padding(18).background(Palette.card, in: RoundedRectangle(cornerRadius: 22))
+        }.padding(18).background(colors.card, in: RoundedRectangle(cornerRadius: 22))
     }
     private func team(_ team: Team) -> some View {
         VStack(spacing: 9) {
