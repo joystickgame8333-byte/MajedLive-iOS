@@ -56,5 +56,32 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(try match(state: "live", homeScore: 0, awayScore: 4).scoreText, "0 : 4")
         XCTAssertEqual(try match(state: "live").scoreText, "— : —")
     }
+    func testNativeHLSSelects720WithoutInvalidMasterGroups() throws {
+        let master = """
+        #EXTM3U
+        #EXT-X-STREAM-INF:RESOLUTION=1920x1080,VIDEO="missing",CODECS="avc1.64002A,mp4a.40.2"
+        high.css?sig=keep-high
+        #EXT-X-STREAM-INF:RESOLUTION=1280x720,VIDEO="missing"
+        medium.css?sig=keep-medium
+        #EXT-X-STREAM-INF:RESOLUTION=852x480
+        low.css?sig=keep-low
+        """
+        let base = try XCTUnwrap(URL(string: "https://example.com/live/master.css?sig=master"))
+        XCTAssertEqual(HLSPlaylist.compatibleVariant(master, base: base).absoluteString,
+                       "https://example.com/live/medium.css?sig=keep-medium")
+        XCTAssertEqual(HLSPlaylist.compatibleVariant("#EXTM3U\n#EXTINF:2\nsegment.ts", base: base), base)
+    }
+    func testHLSAdapterPreservesSignedSegmentAndKeyURLs() throws {
+        let base = try XCTUnwrap(URL(string: "https://example.com/live/variant.css"))
+        let playlist = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin?sig=key\"\n#EXTINF:2\nsegment.png?sig=segment\n"
+        var mapped: [URL] = []
+        let output = HLSPlaylist.rewrite(playlist, base: base) { url in
+            mapped.append(url)
+            return URL(string: "http://localhost:12345/\(mapped.count)/media")!
+        }
+        XCTAssertEqual(mapped.map(\.absoluteString), ["https://example.com/live/key.bin?sig=key", "https://example.com/live/segment.png?sig=segment"])
+        XCTAssertTrue(output.contains("METHOD=AES-128,URI=\"http://localhost:12345/1/media\""))
+        XCTAssertTrue(output.contains("http://localhost:12345/2/media"))
+    }
 
 }

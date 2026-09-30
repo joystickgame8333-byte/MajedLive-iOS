@@ -783,11 +783,15 @@ struct PlayerScreen: View {
     @StateObject private var state = PlayerState()
     @State private var selectedID: String?
     @State private var preferNativeHLS = true
+    @State private var originalPlayback = true
     @State private var reloadID = UUID()
     private var selected: StreamServer {
         playback.servers.first(where: { $0.id == selectedID })
             ?? playback.servers.first(where: { $0.is_default == true })
             ?? playback.servers[0]
+    }
+    private var supportsOriginalPlayer: Bool {
+        selected.playbackURL?.host == "player.majed-koora.live" && !selected.nativeVideo
     }
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -797,10 +801,21 @@ struct PlayerScreen: View {
                     .accessibilityLabel("إغلاق المشغّل")
                 Text(playback.title).font(.subheadline.bold()).lineLimit(1)
                 Spacer(minLength: 0)
-                Button { if selected.nativeVideo { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
+                Button { if selected.nativeVideo || (supportsOriginalPlayer && originalPlayback) { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
                     .accessibilityLabel("تحديث المشغّل")
             }.foregroundStyle(.white).background(Color.black)
-            if !selected.nativeVideo {
+            if supportsOriginalPlayer {
+                HStack {
+                    Text(originalPlayback ? "مشغّل آيفون الأصلي · حتى 720p" : "مشغّل الموقع")
+                        .font(.caption).foregroundStyle(.white.opacity(0.7))
+                    Spacer()
+                    Button(originalPlayback ? "مشغّل الموقع" : "تشغيل آيفون") {
+                        state.error = nil; state.loading = true
+                        originalPlayback.toggle()
+                    }.font(.caption.bold())
+                }.padding(.horizontal, 16).padding(.vertical, 8)
+            }
+            if !selected.nativeVideo && (!supportsOriginalPlayer || !originalPlayback) {
                 HStack(spacing: 8) {
                     Text(preferNativeHLS ? "تشغيل متوافق مع آيفون" : "محرك الموقع")
                         .font(.caption).foregroundStyle(.white.opacity(0.7))
@@ -820,9 +835,12 @@ struct PlayerScreen: View {
             ZStack {
                 if let url = selected.playbackURL {
                     if selected.nativeVideo { NativeVideoPlayer(url: url).id("\(selected.id)-\(reloadID)") }
+                    else if supportsOriginalPlayer && originalPlayback {
+                        OriginalPlayerScreen(server: url, watch: playback.url).id("\(selected.id)-\(reloadID)")
+                    }
                     else { PlayerWebView(url: url, referrer: playback.url, preferNativeHLS: preferNativeHLS, state: state).id("\(selected.id)-\(preferNativeHLS)") }
                 }
-                if !selected.nativeVideo && state.loading && state.error == nil {
+                if !selected.nativeVideo && !(supportsOriginalPlayer && originalPlayback) && state.loading && state.error == nil {
                     Color.black
                     ProgressView("جاري تشغيل البث…").tint(.white).foregroundStyle(.white)
                 }
