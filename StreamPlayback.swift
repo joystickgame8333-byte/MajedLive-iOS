@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import UIKit
 import CryptoKit
 import Network
 
@@ -79,6 +80,20 @@ enum PublishedStream {
 
 enum HLSPlaylist {
     // Select the published 720p rendition directly, avoiding malformed master VIDEO groups.
+    static func byteRange(_ header: String, count: Int) -> Range<Int>? {
+        guard header.hasPrefix("bytes="), count > 0 else { return nil }
+        let values = header.dropFirst(6).split(separator: "-", omittingEmptySubsequences: false)
+        guard values.count == 2 else { return nil }
+        if values[0].isEmpty {
+            guard let suffix = Int(values[1]), suffix > 0 else { return nil }
+            return max(0, count - suffix)..<count
+        }
+        guard let start = Int(values[0]), start >= 0, start < count else { return nil }
+        let end: Int
+        if values[1].isEmpty { end = count - 1 }
+        else { guard let value = Int(values[1]), value >= start else { return nil }; end = min(value, count - 1) }
+        return start..<(end + 1)
+    }
     static func compatibleVariant(_ text: String, base: URL) -> URL {
         let lines = text.components(separatedBy: .newlines)
         var candidates: [(Int, URL)] = []
@@ -126,6 +141,7 @@ final class LiveHLSRelay {
     private let secret = UUID().uuidString
     private let source: URL
     private var port: UInt16 = 0
+    var onFailure: ((Error) -> Void)?
     init(source: URL) { self.source = source }
     func start() async throws -> URL {
         let parameters = NWParameters.tcp
@@ -196,7 +212,23 @@ final class LiveHLSRelay {
                 body = Data(HLSPlaylist.rewrite(playlist, base: remote, map: localURL).utf8)
                 mime = "application/vnd.apple.mpegurl"
             } else if data.first == 0x47 { mime = "video/mp2t" }
-            let header = "HTTP/1.1 200 OK\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            let total = body.count
+            let rangeHeader = request.components(separatedBy: "\r\n").first {
+                $0.lowercased().hasPrefix("range:")
+            }?.dropFirst(6).trimmingCharacters(in: .whitespaces)
+            var status = "200 OK"
+            var extra = "Accept-Ranges: bytes\r\n"
+            if let rangeHeader {
+                if let range = HLSPlaylist.byteRange(rangeHeader, count: total) {
+                    body = body.subdata(in: range)
+                    status = "206 Partial Content"
+                    extra += "Content-Range: bytes \(range.lowerBound)-\(range.upperBound - 1)/\(total)\r\n"
+                } else {
+                    body = Data(); status = "416 Range Not Satisfiable"
+                    extra += "Content-Range: bytes */\(total)\r\n"
+                }
+            }
+            let header = "HTTP/1.1 \(status)\r\nContent-Type: \(mime)\r\nContent-Length: \(body.count)\r\n\(extra)Cache-Control: no-store\r\nConnection: close\r\n\r\n"
             var result = Data(header.utf8)
             if first[0] != "HEAD" { result.append(body) }
             connection.send(content: result, completion: .contentProcessed { [weak self] _ in
@@ -204,6 +236,7 @@ final class LiveHLSRelay {
                 self?.queue.async { [weak self] in self?.connections.removeAll { $0 === connection } }
             })
         } catch {
+            onFailure?(error)
             connection.send(content: Data("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8),
                             completion: .contentProcessed { _ in connection.cancel() })
         }
@@ -215,12 +248,28 @@ final class OriginalPlayerModel: ObservableObject {
     @Published var player: AVPlayer?
     @Published var loading = true
     @Published var error: String?
+    @Published var stage = "تصريح الموقع"
+    @Published var details = ""
+    private var readinessTimeout: Task<Void, Never>?
+    private static func errorCode(_ error: Error) -> String {
+        var result: [String] = []
+        var current: NSError? = error as NSError
+        for _ in 0..<4 {
+            guard let value = current else { break }
+            // Never expose signed source URLs or authorization from error userInfo.
+            let domain = value.domain.range(of: "^[A-Za-z0-9_.-]+$", options: .regularExpression) != nil ? value.domain : "MediaError"
+            result.append("\(domain): \(value.code)")
+            current = value.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return result.joined(separator: " → ")
+    }
     private var relay: LiveHLSRelay?
     private var observation: NSKeyValueObservation?
     func start(server: URL, watch: URL) async {
-        stop(); loading = true; error = nil
+        stop(); loading = true; error = nil; stage = "تصريح الموقع"; details = ""
         do {
             let master = try await PublishedStream.resolve(player: server, watch: watch)
+            stage = "قائمة البث"
             let (data, _) = try await PublishedStream.request(master, headers: ["Origin": "https://player.majed-koora.live"])
             guard let playlist = String(data: data, encoding: .utf8), playlist.hasPrefix("#EXTM3U") else {
                 throw APIError.server("السيرفر لم يرسل قائمة بث صالحة.")
@@ -228,31 +277,58 @@ final class OriginalPlayerModel: ObservableObject {
             let selected = HLSPlaylist.compatibleVariant(playlist, base: master)
             let relay = LiveHLSRelay(source: selected)
             self.relay = relay
+            relay.onFailure = { [weak self] failure in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.details = "تحميل مقاطع البث: " + ((failure as? APIError)?.errorDescription ?? Self.errorCode(failure))
+                }
+            }
+            stage = "اتصال المشغّل داخل التطبيق"
             let local = try await relay.start()
+            // Test the same loopback playlist AVPlayer will request before starting it.
+            let (localData, _) = try await PublishedStream.request(local)
+            guard String(data: localData, encoding: .utf8)?.hasPrefix("#EXTM3U") == true else {
+                throw APIError.server("لم تصل قائمة البث إلى المشغّل داخل التطبيق.")
+            }
             try Task.checkCancellation()
+            stage = "تشغيل الفيديو"
             let item = AVPlayerItem(url: local)
             observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                 Task { @MainActor in
                     guard let self else { return }
-                    if item.status == .readyToPlay { self.loading = false }
+                    if item.status == .readyToPlay { self.loading = false; self.readinessTimeout?.cancel() }
                     if item.status == .failed {
                         self.loading = false
-                        self.error = "تعذّر تشغيل الفيديو بمشغّل آيفون (\((item.error as NSError?)?.code ?? 0))."
+                        self.readinessTimeout?.cancel()
+                        self.error = "تعذّر تشغيل الفيديو بمشغّل آيفون."
+                        if let failure = item.error { self.details = Self.errorCode(failure) + "\n" + self.details }
+                        if let event = item.errorLog()?.events.last {
+                            self.details += "\nHLS: \(event.errorStatusCode)"
+                        }
                     }
                 }
             }
             let player = AVPlayer(playerItem: item)
             self.player = player
             player.play()
+            readinessTimeout = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 25_000_000_000) } catch { return }
+                guard let self, self.loading else { return }
+                self.loading = false
+                self.error = "انتهت مهلة تجهيز الفيديو."
+                if let event = item.errorLog()?.events.last { self.details += "\nHLS: \(event.errorStatusCode)" }
+            }
         } catch {
             relay?.stop(); relay = nil
             loading = false
             if !(error is CancellationError) {
                 self.error = (error as? APIError)?.errorDescription ?? "تعذّر تجهيز البث. أعد المحاولة."
+                details = Self.errorCode(error) + (details.isEmpty ? "" : "\n" + details)
             }
         }
     }
     func stop() {
+        readinessTimeout?.cancel(); readinessTimeout = nil
         observation = nil
         player?.pause(); player?.replaceCurrentItem(with: nil); player = nil
         relay?.stop(); relay = nil
@@ -267,11 +343,23 @@ struct OriginalPlayerScreen: View {
     var body: some View {
         ZStack {
             VideoPlayer(player: model.player)
-            if model.loading { ProgressView("جاري تجهيز تشغيل آيفون…").tint(.white).foregroundStyle(.white) }
+            if model.loading {
+                VStack(spacing: 12) {
+                    ProgressView("جاري تجهيز تشغيل آيفون…")
+                    Text(model.stage).font(.caption)
+                }.tint(.white).foregroundStyle(.white)
+            }
             if let error = model.error {
                 Color.black
                 VStack(spacing: 18) {
                     Text(error).multilineTextAlignment(.center)
+                    Text("المرحلة: " + model.stage).font(.caption)
+                    Text(model.details).font(.caption.monospaced()).multilineTextAlignment(.center)
+                        .environment(\.layoutDirection, .leftToRight)
+                    Button("نسخ تفاصيل الخطأ") {
+                        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+                        UIPasteboard.general.string = "Build \(build)\n\(model.stage)\n\(error)\n\(model.details)"
+                    }
                     Button("إعادة المحاولة") { retryID = UUID() }.buttonStyle(.borderedProminent)
                 }.foregroundStyle(.white).padding(24)
             }

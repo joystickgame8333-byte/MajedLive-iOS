@@ -84,4 +84,15 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertTrue(output.contains("http://localhost:12345/2/media"))
     }
 
+    func testNativeMediaByteRanges() {
+        XCTAssertEqual(HLSPlaylist.byteRange("bytes=0-1", count: 10), 0..<2)
+        XCTAssertEqual(HLSPlaylist.byteRange("bytes=3-", count: 10), 3..<10)
+        XCTAssertEqual(HLSPlaylist.byteRange("bytes=-4", count: 10), 6..<10)
+        XCTAssertEqual(HLSPlaylist.byteRange("bytes=8-99", count: 10), 8..<10)
+        XCTAssertNil(HLSPlaylist.byteRange("bytes=10-", count: 10))
+        XCTAssertNil(HLSPlaylist.byteRange("bytes=4-2", count: 10))
+        XCTAssertNil(HLSPlaylist.byteRange("bytes=0-1,4-5", count: 10))
+        XCTAssertNil(HLSPlaylist.byteRange("bytes=0-", count: 0))
+    }
+
 }
