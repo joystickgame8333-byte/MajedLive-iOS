@@ -380,23 +380,21 @@ struct MatchesScreen: View {
 
     private var appearancePicker: some View {
         let selected = Appearance(rawValue: appearance) ?? .automatic
-        return HStack {
-            Text("مظهر التطبيق").font(.subheadline).foregroundStyle(.secondary)
-            Spacer()
-            Menu {
-                Picker("مظهر التطبيق", selection: $appearance) {
-                    ForEach(Appearance.allCases) { option in
-                        Label(option.title, systemImage: option.symbol).tag(option.rawValue)
-                    }
-                }
-            } label: {
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("مظهر التطبيق").font(.subheadline.weight(.semibold))
+                Spacer()
                 Label(selected.title, systemImage: selected.symbol)
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, 12).padding(.vertical, 9)
-                    .background(Palette.card, in: Capsule())
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            .accessibilityLabel("مظهر التطبيق: \(selected.title)")
-        }
+            Picker("مظهر التطبيق", selection: $appearance) {
+                Text("نهاري ☀️").tag(Appearance.light.rawValue)
+                Text("ليلي 🌙").tag(Appearance.dark.rawValue)
+                Text("تلقائي").tag(Appearance.automatic.rawValue)
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("appearancePicker")
+        }.padding(14).background(Palette.card, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private var header: some View {
