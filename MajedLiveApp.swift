@@ -782,6 +782,7 @@ struct PlayerScreen: View {
     let playback: Playback
     @StateObject private var state = PlayerState()
     @State private var selectedID: String?
+    @State private var preferNativeHLS = true
     @State private var reloadID = UUID()
     private var selected: StreamServer {
         playback.servers.first(where: { $0.id == selectedID })
@@ -799,6 +800,18 @@ struct PlayerScreen: View {
                 Button { if selected.nativeVideo { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
                     .accessibilityLabel("تحديث المشغّل")
             }.foregroundStyle(.white).background(Color.black)
+            if !selected.nativeVideo {
+                HStack(spacing: 8) {
+                    Text(preferNativeHLS ? "تشغيل متوافق مع آيفون" : "محرك الموقع")
+                        .font(.caption).foregroundStyle(.white.opacity(0.7))
+                    Spacer()
+                    Button(preferNativeHLS ? "تجربة محرك الموقع" : "تشغيل آيفون") {
+                        state.error = nil
+                        state.loading = true
+                        preferNativeHLS.toggle()
+                    }.font(.caption.bold())
+                }.padding(.horizontal, 16).padding(.vertical, 8)
+            }
             if playback.servers.count > 1 {
                 Picker("سيرفر البث", selection: Binding(get: { selected.id }, set: { selectedID = $0 })) {
                     ForEach(playback.servers) { server in Text(server.name).tag(server.id) }
@@ -807,7 +820,7 @@ struct PlayerScreen: View {
             ZStack {
                 if let url = selected.playbackURL {
                     if selected.nativeVideo { NativeVideoPlayer(url: url).id("\(selected.id)-\(reloadID)") }
-                    else { PlayerWebView(url: url, referrer: playback.url, state: state).id(selected.id) }
+                    else { PlayerWebView(url: url, referrer: playback.url, preferNativeHLS: preferNativeHLS, state: state).id("\(selected.id)-\(preferNativeHLS)") }
                 }
                 if !selected.nativeVideo && state.loading && state.error == nil {
                     Color.black
@@ -840,6 +853,7 @@ struct NativeVideoPlayer: View {
 struct PlayerWebView: UIViewRepresentable {
     let url: URL
     let referrer: URL
+    let preferNativeHLS: Bool
     let state: PlayerState
     func makeCoordinator() -> Coordinator { Coordinator(url: url, state: state) }
     func makeUIView(context: Context) -> WKWebView {
@@ -849,6 +863,37 @@ struct PlayerWebView: UIViewRepresentable {
         configuration.allowsAirPlayForMediaPlayback = true
         configuration.allowsPictureInPictureMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        if preferNativeHLS {
+            // Prefer Apple's supported HLS path in the published player's adapter.
+            // This changes only media engine selection, not URLs, access or DRM.
+            let nativeHLS = """
+            (function () {
+                if (location.hostname !== 'player.majed-koora.live') return;
+                var appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+                var probe = document.createElement('video');
+                if (!appleMobile || !(probe.canPlayType('application/vnd.apple.mpegurl') ||
+                    probe.canPlayType('application/x-mpegurl'))) return;
+                var library;
+                function preferNative(value) {
+                    if (value && typeof value.isSupported === 'function') {
+                        value.isSupported = function () { return false; };
+                    }
+                    return value;
+                }
+                var descriptor = Object.getOwnPropertyDescriptor(window, 'Hls');
+                if (descriptor && !descriptor.configurable) return;
+                library = preferNative(window.Hls);
+                Object.defineProperty(window, 'Hls', {
+                    configurable: true,
+                    get: function () { return library; },
+                    set: function (value) { library = preferNative(value); }
+                });
+            })();
+            """
+            configuration.userContentController.addUserScript(WKUserScript(
+                source: nativeHLS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.isOpaque = false
         view.backgroundColor = .black
