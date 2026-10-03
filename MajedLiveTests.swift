@@ -2,7 +2,7 @@ import XCTest
 @testable import MajedLive
 
 final class MajedLiveTests: XCTestCase {
-    private func match(ready: Bool = true, available: Bool = true, enabled: Bool = true, url: String = "https://majed-koora.live/watch.html?id=42", state: String = "upcoming", elapsed: Int? = nil, syncedAt: Double? = nil, leagueID: String = "cup1", homeScore: Int? = nil, awayScore: Int? = nil) throws -> Match {
+    private func match(ready: Bool = true, available: Bool = true, enabled: Bool = true, url: String = "https://majed-koora.live/watch.html?id=42", state: String = "upcoming", elapsed: Int? = nil, syncedAt: Double? = nil, leagueID: String = "cup1", homeScore: Int? = nil, awayScore: Int? = nil, broadcast: [String: Any]? = nil, stadium: String? = nil, round: String? = nil) throws -> Match {
         var payload: [String: Any] = [
             "id": "42", "date": "2026-09-30", "time": "19:00", "state": state,
             "home_team": ["name": "الأول"], "away_team": ["name": "الثاني"], "tournament": ["id": leagueID, "name": "البطولة"],
@@ -12,8 +12,29 @@ final class MajedLiveTests: XCTestCase {
         if let syncedAt { payload["clock_synced_at"] = syncedAt }
         if let homeScore { payload["home_team"] = ["name": "الأول", "score": homeScore] }
         if let awayScore { payload["away_team"] = ["name": "الثاني", "score": awayScore] }
+        if let broadcast { payload["broadcast"] = broadcast }
+        if let stadium { payload["stadium"] = stadium }
+        if let round { payload["round"] = round }
         return try JSONDecoder().decode(Match.self, from: JSONSerialization.data(withJSONObject: payload))
     }
+    func testPublishedMatchInformationAndMissingMetadataDoNotChangePlaybackAvailability() throws {
+        let published = try match(broadcast: ["channel": "  قناة رياضية 1، قناة رياضية 2  ", "commentator": "المعلق"],
+                                  stadium: " الملعب ", round: "الجولة 3")
+        XCTAssertEqual(published.broadcastChannel, "قناة رياضية 1، قناة رياضية 2")
+        XCTAssertEqual(published.commentatorName, "المعلق")
+        XCTAssertEqual(published.stadiumName, "الملعب")
+        XCTAssertEqual(published.roundTitle, "الجولة 3")
+        XCTAssertNotNil(published.playbackURL)
+        for missing in [try match(), try match(broadcast: ["channel": " \n ", "commentator": NSNull()], stadium: "", round: " ")] {
+            XCTAssertNil(missing.broadcastChannel)
+            XCTAssertNil(missing.commentatorName)
+            XCTAssertNil(missing.stadiumName)
+            XCTAssertNil(missing.roundTitle)
+            XCTAssertNotNil(missing.playbackURL)
+        }
+        XCTAssertNil(try match(ready: false, broadcast: ["channel": "القناة"]).playbackURL)
+    }
+
     func testNoPublishedBroadcastHasNoPlayerURL() throws {
         XCTAssertNil(try match(ready: false, available: false, url: "").playbackURL)
     }

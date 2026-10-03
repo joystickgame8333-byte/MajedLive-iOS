@@ -164,6 +164,33 @@ struct Competition: Decodable {
     let logo: String?
 }
 
+struct MatchBroadcast: Decodable {
+    let channel: String?
+    let commentator: String?
+}
+
+enum MatchInformation {
+    static func text(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+    static func dateTitle(_ value: String) -> String {
+        let parser = DateFormatter()
+        parser.calendar = Calendar(identifier: .gregorian)
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = TimeZone(identifier: "Asia/Riyadh")
+        parser.dateFormat = "yyyy-MM-dd"
+        guard let date = parser.date(from: value) else { return value }
+        let formatter = DateFormatter()
+        formatter.calendar = parser.calendar
+        formatter.locale = Locale(identifier: "ar")
+        formatter.timeZone = parser.timeZone
+        formatter.dateFormat = "EEEE، d MMMM yyyy"
+        return formatter.string(from: date)
+    }
+}
+
 struct Match: Decodable, Identifiable {
     let id: String
     let date: String
@@ -176,10 +203,18 @@ struct Match: Decodable, Identifiable {
     let home_team: Team
     let away_team: Team
     let tournament: Competition
+    let broadcast: MatchBroadcast?
+    let stadium: String?
+    let round: String?
     let watch_ready: Bool?
     let watch_available: Bool?
     let site_watch_enabled: Bool?
     let watch_url: String?
+
+    var broadcastChannel: String? { MatchInformation.text(broadcast?.channel) }
+    var commentatorName: String? { MatchInformation.text(broadcast?.commentator) }
+    var stadiumName: String? { MatchInformation.text(stadium) }
+    var roundTitle: String? { MatchInformation.text(round) }
 
     // Mirror the website's matchAction conditions; never invent a stream URL.
     var playbackURL: URL? {
@@ -731,6 +766,7 @@ struct MatchCard: View {
     let match: Match
     let checking: Bool
     let action: () -> Void
+    @State private var showingInformation = false
     var body: some View {
         VStack(spacing: 18) {
             HStack(spacing: 8) {
@@ -770,6 +806,7 @@ struct MatchCard: View {
             }
             Label("وقت البداية: " + match.time, systemImage: "clock")
                 .font(.caption).foregroundStyle(.secondary)
+            matchInformation
             Button(action: action) {
                 HStack(spacing: 8) {
                     if checking { ProgressView().tint(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent : .white) }
@@ -781,6 +818,54 @@ struct MatchCard: View {
                     .background(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent.opacity(0.08) : colors.accent, in: RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain).accessibilityIdentifier("watch-\(match.id)")
         }.padding(18).background(colors.card, in: RoundedRectangle(cornerRadius: 22))
+    }
+    private var matchInformation: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "tv.fill").foregroundStyle(colors.accent)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("القناة الناقلة").font(.caption).foregroundStyle(.secondary)
+                    Text(match.broadcastChannel ?? "القناة الناقلة لم تُعلن بعد")
+                        .font(.subheadline.weight(match.broadcastChannel == nil ? .regular : .semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }.accessibilityElement(children: .combine)
+            DisclosureGroup(isExpanded: $showingInformation) {
+                VStack(spacing: 12) {
+                    informationRow("البطولة", value: match.tournament.name, symbol: "trophy")
+                    informationRow("التاريخ", value: MatchInformation.dateTitle(match.date), symbol: "calendar")
+                    informationRow("وقت البداية", value: match.time, symbol: "clock")
+                    if let round = match.roundTitle {
+                        informationRow("الجولة", value: round, symbol: "flag")
+                    }
+                    if let stadium = match.stadiumName {
+                        informationRow("الملعب", value: stadium, symbol: "mappin.and.ellipse")
+                    }
+                    if let commentator = match.commentatorName {
+                        informationRow("المعلق", value: commentator, symbol: "mic")
+                    }
+                    if match.stadiumName == nil && match.commentatorName == nil {
+                        Text("تظهر معلومات الملعب والمعلق عند الإعلان عنها.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }.padding(.top, 12)
+            } label: {
+                Label("معلومات المباراة", systemImage: "info.circle")
+                    .font(.caption.weight(.semibold))
+            }.tint(colors.accent)
+                .accessibilityIdentifier("match-information-\(match.id)")
+        }.padding(12)
+            .background(colors.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 13))
+    }
+    private func informationRow(_ title: String, value: String, symbol: String) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Label(title, systemImage: symbol).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Text(value).multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+        }.font(.caption).accessibilityElement(children: .combine)
     }
     private func team(_ team: Team) -> some View {
         VStack(spacing: 9) {
