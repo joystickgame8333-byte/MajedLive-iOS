@@ -11,7 +11,7 @@ struct MajedLiveApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MatchesScreen()
+            FootballShell()
                 .environment(\.layoutDirection, .rightToLeft)
                 .environment(\.appTheme, theme)
                 .tint(theme.accent)
@@ -266,6 +266,8 @@ struct Playback: Identifiable {
     let title: String
     let url: URL
     let servers: [StreamServer]
+    var providerName = "ماجد لايف"
+    var initialServerID: String? = nil
 }
 
 struct StreamServer: Decodable, Identifiable {
@@ -417,6 +419,8 @@ struct MatchesScreen: View {
     @State private var showingSettings = false
     @State private var day = 0
     @State private var playback: Playback?
+    @State private var sourceSelection: BroadcastSelection?
+    @State private var pendingPlayback: Playback?
     @State private var checkingMatch: String?
     @State private var message: String?
     @Environment(\.scenePhase) private var scenePhase
@@ -515,6 +519,12 @@ struct MatchesScreen: View {
             }
             .onChange(of: day) { _ in model.matches = []; model.updated = nil }
             .sheet(isPresented: $showingSettings) { SettingsScreen(updates: updates) }
+            .sheet(item: $sourceSelection, onDismiss: {
+                playback = pendingPlayback
+                pendingPlayback = nil
+            }) { selection in
+                BroadcastSelectionScreen(selection: selection) { chosen in pendingPlayback = chosen }
+            }
             .fullScreenCover(item: $playback) { selected in PlayerScreen(playback: selected) }
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
@@ -557,7 +567,8 @@ struct MatchesScreen: View {
                 Image(systemName: "soccerball").font(.system(size: 23)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("ماجد لايف").font(.title3.bold())
+                Text(FootballBrand.name).font(.title3.bold())
+                Text("المباريات ومصادر البث").font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
             Button { showingSettings = true } label: {
@@ -578,13 +589,15 @@ struct MatchesScreen: View {
         do {
             // Recheck availability on every tap; a previously published link can expire.
             let fresh = try await model.api.load(date: match.date)
-            guard let current = fresh.first(where: { $0.id == match.id }), let url = current.playbackURL else {
-                message = "البث لم يُنشر في الموقع بعد. عندما يفعّله صاحب الموقع سيظهر زر المشاهدة تلقائيًا."
+            guard let current = fresh.first(where: { $0.id == match.id }), current.playbackURL != nil else {
+                message = "البث غير متاح لهذه المباراة حاليًا. سيظهر خيار المشاهدة عند توفره."
                 await model.refresh(offset: day)
                 return
             }
-            let servers = try await WatchAPI().servers(publishedURL: url)
-            playback = Playback(title: "\(current.home_team.name) × \(current.away_team.name)", url: url, servers: servers)
+            let sources = try await BroadcastCatalog.sources(for: current)
+            guard !sources.isEmpty else { message = "لا توجد مصادر بث متاحة لهذه المباراة حاليًا."; return }
+            pendingPlayback = nil
+            sourceSelection = BroadcastSelection(title: "\(current.home_team.name) × \(current.away_team.name)", sources: sources)
         } catch {
             message = (error as? APIError)?.errorDescription ?? "تعذّر التحقق من البث. تأكد من الإنترنت وحاول مجددًا."
         }
@@ -750,7 +763,7 @@ struct MatchCard: View {
                 HStack(spacing: 8) {
                     if checking { ProgressView().tint(match.playbackURL == nil ? colors.accent : .white) }
                     else { Image(systemName: match.playbackURL == nil ? "clock" : "play.fill") }
-                    Text(checking ? "جاري التحقق…" : match.playbackURL == nil ? "البث لم يُنشر بعد" : "مشاهدة البث")
+                    Text(checking ? "جاري التحقق…" : match.playbackURL == nil ? "البث لم يُنشر بعد" : "شاهد المباراة")
                         .font(.subheadline.bold())
                 }.frame(maxWidth: .infinity).padding(.vertical, 13)
                     .foregroundStyle(match.playbackURL == nil ? colors.accent : .white)
@@ -782,6 +795,10 @@ struct PlayerScreen: View {
     let playback: Playback
     @StateObject private var state = PlayerState()
     @State private var selectedID: String?
+    init(playback: Playback) {
+        self.playback = playback
+        _selectedID = State(initialValue: playback.initialServerID)
+    }
     @State private var preferNativeHLS = true
     @State private var originalPlayback = true
     @State private var reloadID = UUID()
@@ -827,11 +844,21 @@ struct PlayerScreen: View {
                     }.font(.caption.bold())
                 }.padding(.horizontal, 16).padding(.vertical, 8)
             }
-            if playback.servers.count > 1 {
-                Picker("سيرفر البث", selection: Binding(get: { selected.id }, set: { selectedID = $0 })) {
-                    ForEach(playback.servers) { server in Text(server.name).tag(server.id) }
-                }.pickerStyle(.segmented).padding(10)
-            }
+            HStack {
+                Label(playback.providerName, systemImage: "play.tv.fill")
+                    .font(.caption).foregroundStyle(.white.opacity(0.7))
+                Spacer()
+                Menu {
+                    ForEach(playback.servers) { server in
+                        Button { selectedID = server.id } label: {
+                            if selected.id == server.id { Label(server.name, systemImage: "checkmark") }
+                            else { Text(server.name) }
+                        }
+                    }
+                } label: {
+                    Label("تغيير البث", systemImage: "arrow.triangle.2.circlepath").font(.caption.bold())
+                }
+            }.padding(.horizontal, 16).padding(.vertical, 8)
             ZStack {
                 if let url = selected.playbackURL {
                     if selected.nativeVideo { NativeVideoPlayer(url: url).id("\(selected.id)-\(reloadID)") }

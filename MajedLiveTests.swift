@@ -95,4 +95,16 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertNil(HLSPlaylist.byteRange("bytes=0-", count: 0))
     }
 
+    func testBroadcastChoiceKeepsProviderContextAndChosenServer() throws {
+        let first = StreamServer(id: "one", name: "Server 1", type: "iframe", url: "https://example.com/one", enabled: true, is_default: true, priority: 0)
+        let chosen = StreamServer(id: "two", name: "Server 2", type: "m3u8", url: "https://example.com/two.m3u8", enabled: true, is_default: false, priority: 1)
+        let watch = try XCTUnwrap(URL(string: "https://example.com/watch"))
+        let source = BroadcastSource(id: "provider", name: "Provider", watchURL: watch, servers: [first, chosen])
+        let playback = source.playback(title: "Match", server: chosen)
+        XCTAssertEqual(playback.initialServerID, "two")
+        XCTAssertEqual(playback.url, watch)
+        XCTAssertEqual(playback.providerName, "Provider")
+        XCTAssertEqual(playback.servers.count, 2)
+    }
+
 }
