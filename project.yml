@@ -17,6 +17,7 @@ targets:
       - path: MajedLiveApp.swift
       - path: StreamPlayback.swift
       - path: FootballShell.swift
+      - path: FajrPlayback.swift
       - path: Assets.xcassets
     settings:
       base:

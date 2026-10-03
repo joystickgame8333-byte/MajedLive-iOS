@@ -26,6 +26,7 @@ struct BroadcastSource: Identifiable {
     let name: String
     let watchURL: URL
     let servers: [StreamServer]
+    var note: String? = nil
     func playback(title: String, server: StreamServer) -> Playback {
         Playback(title: title, url: watchURL, servers: servers,
                  providerName: name, initialServerID: server.id)
@@ -40,9 +41,22 @@ struct BroadcastSelection: Identifiable {
 
 enum BroadcastCatalog {
     static func sources(for match: Match) async throws -> [BroadcastSource] {
-        guard let watchURL = match.playbackURL else { return [] }
-        let servers = try await WatchAPI().servers(publishedURL: watchURL)
-        return [BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watchURL, servers: servers)]
+        var sources: [BroadcastSource] = []
+        if let watchURL = match.playbackURL,
+           let servers = try? await WatchAPI().servers(publishedURL: watchURL) {
+            sources.append(BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watchURL, servers: servers))
+        }
+        let channels = ChannelCatalog.channels.flatMap { channel in
+            channel.source.servers.map { server in
+                StreamServer(id: server.id, name: "\(channel.name) · \(server.name)", type: server.type,
+                             url: server.url, enabled: server.enabled, is_default: server.is_default, priority: server.priority)
+            }
+        }
+        if !channels.isEmpty {
+            sources.append(BroadcastSource(id: "fajr", name: "تلفزيون الفجر", watchURL: FajrStream.origin,
+                servers: channels, note: "هذه قنوات مباشرة؛ اختر القناة التي تعرض المباراة."))
+        }
+        return sources
     }
 }
 
@@ -64,6 +78,7 @@ struct BroadcastSelectionScreen: View {
                     ForEach(selection.sources) { source in
                         VStack(alignment: .leading, spacing: 12) {
                             Label(source.name, systemImage: "play.tv.fill").font(.headline)
+                            if let note = source.note { Text(note).font(.caption).foregroundStyle(.secondary) }
                             ForEach(source.servers) { server in
                                 Button {
                                     onSelect(source.playback(title: selection.title, server: server))
@@ -106,8 +121,24 @@ struct LiveChannel: Identifiable {
 }
 
 enum ChannelCatalog {
-    // Populate only after receiving real, published channel sources.
-    static let channels: [LiveChannel] = []
+    private static func channel(_ id: String, _ name: String, pages: [(String, String)]) -> LiveChannel {
+        let servers = pages.enumerated().map { index, page in
+            StreamServer(id: "fajr-\(id)-\(index)", name: page.0, type: "fajr_hls_page",
+                         url: FajrStream.origin.appendingPathComponent(page.1).absoluteString,
+                         enabled: true, is_default: index == 0, priority: index)
+        }
+        return LiveChannel(id: "fajr-" + id, name: name,
+            source: BroadcastSource(id: "fajr-" + id, name: "تلفزيون الفجر", watchURL: FajrStream.origin, servers: servers))
+    }
+    static let channels: [LiveChannel] = [
+        channel("one", "الفجر · قناة 1", pages: [("مشغّل 1", "live-westbank-1.php"), ("مشغّل 2", "live-westbank-1-a.php"), ("مشغّل 3", "live-westbank-1-b.php")]),
+        channel("hq", "الفجر · Full HD", pages: [("مشغّل القناة", "live-westbank-1-HQ.php")]),
+        channel("two", "الفجر · قناة 2 (دولي)", pages: [("مشغّل القناة", "live-westbank-2.php")]),
+        channel("three", "الفجر · قناة 3", pages: [("مشغّل القناة", "live-westbank-3.php")]),
+        channel("four", "الفجر · قناة 4", pages: [("مشغّل القناة", "live-westbank-4.php")]),
+        channel("five", "الفجر · قناة 5", pages: [("مشغّل القناة", "live-westbank-5.php")]),
+        channel("international", "الفجر · دولي", pages: [("مشغّل القناة", "live-international.php")])
+    ]
 }
 
 struct ChannelsScreen: View {

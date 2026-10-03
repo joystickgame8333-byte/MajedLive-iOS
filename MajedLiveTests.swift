@@ -107,4 +107,13 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(playback.servers.count, 2)
     }
 
+    func testFajrSourcesKeepFreshPublishedSignaturesAndRejectUnsafeURLs() {
+        let html = #"src: "https://vstream6.hadara.ps:8443/live/playlist.m3u8?sig=fresh&amp;id=1", src: "http://vstream6.hadara.ps/live/playlist.m3u8", src: "https://other.example/live/playlist.m3u8", src: "https://vstream6.hadara.ps:8443/live/playlist.m3u8?sig=fresh&amp;id=1""#
+        let sources = FajrStream.candidates(html: html)
+        XCTAssertEqual(sources.count, 1)
+        XCTAssertEqual(sources.first?.query, "sig=fresh&id=1")
+        XCTAssertTrue(ChannelCatalog.channels.allSatisfy { $0.playback != nil })
+        XCTAssertEqual(Set(ChannelCatalog.channels.flatMap { $0.source.servers.map(\.id) }).count, 9)
+    }
+
 }

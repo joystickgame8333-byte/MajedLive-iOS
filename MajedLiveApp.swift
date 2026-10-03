@@ -589,8 +589,8 @@ struct MatchesScreen: View {
         do {
             // Recheck availability on every tap; a previously published link can expire.
             let fresh = try await model.api.load(date: match.date)
-            guard let current = fresh.first(where: { $0.id == match.id }), current.playbackURL != nil else {
-                message = "البث غير متاح لهذه المباراة حاليًا. سيظهر خيار المشاهدة عند توفره."
+            guard let current = fresh.first(where: { $0.id == match.id }) else {
+                message = "هذه المباراة لم تعد موجودة في الجدول الحالي."
                 await model.refresh(offset: day)
                 return
             }
@@ -761,13 +761,13 @@ struct MatchCard: View {
                 .font(.caption).foregroundStyle(.secondary)
             Button(action: action) {
                 HStack(spacing: 8) {
-                    if checking { ProgressView().tint(match.playbackURL == nil ? colors.accent : .white) }
-                    else { Image(systemName: match.playbackURL == nil ? "clock" : "play.fill") }
-                    Text(checking ? "جاري التحقق…" : match.playbackURL == nil ? "البث لم يُنشر بعد" : "شاهد المباراة")
+                    if checking { ProgressView().tint(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent : .white) }
+                    else { Image(systemName: match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? "clock" : "play.fill") }
+                    Text(checking ? "جاري التحقق…" : match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? "البث لم يُنشر بعد" : "اختيار البث")
                         .font(.subheadline.bold())
                 }.frame(maxWidth: .infinity).padding(.vertical, 13)
-                    .foregroundStyle(match.playbackURL == nil ? colors.accent : .white)
-                    .background(match.playbackURL == nil ? colors.accent.opacity(0.08) : colors.accent, in: RoundedRectangle(cornerRadius: 13))
+                    .foregroundStyle(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent : .white)
+                    .background(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent.opacity(0.08) : colors.accent, in: RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain).accessibilityIdentifier("watch-\(match.id)")
         }.padding(18).background(colors.card, in: RoundedRectangle(cornerRadius: 22))
     }
@@ -810,6 +810,7 @@ struct PlayerScreen: View {
     private var supportsOriginalPlayer: Bool {
         selected.playbackURL?.host == "player.majed-koora.live" && !selected.nativeVideo
     }
+    private var supportsFajrPlayer: Bool { selected.type == "fajr_hls_page" }
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(spacing: 0) {
@@ -818,12 +819,12 @@ struct PlayerScreen: View {
                     .accessibilityLabel("إغلاق المشغّل")
                 Text(playback.title).font(.subheadline.bold()).lineLimit(1)
                 Spacer(minLength: 0)
-                Button { if selected.nativeVideo || (supportsOriginalPlayer && originalPlayback) { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
+                Button { if selected.nativeVideo || ((supportsOriginalPlayer || supportsFajrPlayer) && originalPlayback) { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
                     .accessibilityLabel("تحديث المشغّل")
             }.foregroundStyle(.white).background(Color.black)
-            if supportsOriginalPlayer {
+            if supportsOriginalPlayer || supportsFajrPlayer {
                 HStack {
-                    Text(originalPlayback ? "مشغّل آيفون الأصلي · حتى 720p" : "مشغّل الموقع")
+                    Text(originalPlayback ? (supportsFajrPlayer ? "الفجر · مشغّل آيفون" : "مشغّل آيفون الأصلي · حتى 720p") : "مشغّل الموقع")
                         .font(.caption).foregroundStyle(.white.opacity(0.7))
                     Spacer()
                     Button(originalPlayback ? "مشغّل الموقع" : "تشغيل آيفون") {
@@ -832,7 +833,7 @@ struct PlayerScreen: View {
                     }.font(.caption.bold())
                 }.padding(.horizontal, 16).padding(.vertical, 8)
             }
-            if !selected.nativeVideo && (!supportsOriginalPlayer || !originalPlayback) {
+            if !selected.nativeVideo && (!(supportsOriginalPlayer || supportsFajrPlayer) || !originalPlayback) {
                 HStack(spacing: 8) {
                     Text(preferNativeHLS ? "تشغيل متوافق مع آيفون" : "محرك الموقع")
                         .font(.caption).foregroundStyle(.white.opacity(0.7))
@@ -862,12 +863,15 @@ struct PlayerScreen: View {
             ZStack {
                 if let url = selected.playbackURL {
                     if selected.nativeVideo { NativeVideoPlayer(url: url).id("\(selected.id)-\(reloadID)") }
+                    else if supportsFajrPlayer && originalPlayback {
+                        FajrPlayerScreen(page: url).id("\(selected.id)-\(reloadID)")
+                    }
                     else if supportsOriginalPlayer && originalPlayback {
                         OriginalPlayerScreen(server: url, watch: playback.url).id("\(selected.id)-\(reloadID)")
                     }
                     else { PlayerWebView(url: url, referrer: playback.url, preferNativeHLS: preferNativeHLS, state: state).id("\(selected.id)-\(preferNativeHLS)") }
                 }
-                if !selected.nativeVideo && !(supportsOriginalPlayer && originalPlayback) && state.loading && state.error == nil {
+                if !selected.nativeVideo && !((supportsOriginalPlayer || supportsFajrPlayer) && originalPlayback) && state.loading && state.error == nil {
                     Color.black
                     ProgressView("جاري تشغيل البث…").tint(.white).foregroundStyle(.white)
                 }
