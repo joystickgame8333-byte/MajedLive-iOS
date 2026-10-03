@@ -140,10 +140,14 @@ final class LiveHLSRelay {
     private var connections: [NWConnection] = []
     private let secret = UUID().uuidString
     private let source: URL
+    private let upstreamHeaders: [String: String]
     private var port: UInt16 = 0
     var onFailure: ((Error) -> Void)?
     var onRequest: ((String) -> Void)?
-    init(source: URL) { self.source = source }
+    init(source: URL, headers: [String: String] = ["Origin": "https://player.majed-koora.live"]) {
+        self.source = source
+        self.upstreamHeaders = headers
+    }
     func start() async throws -> URL {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -207,7 +211,7 @@ final class LiveHLSRelay {
         onRequest?(["css", "m3u8"].contains(remote.pathExtension.lowercased()) ? "قائمة البث" : "مقطع الفيديو")
         do {
             // All URLs retain the original site's signatures; no authentication is replaced.
-            let (data, response) = try await PublishedStream.request(remote, headers: ["Origin": "https://player.majed-koora.live"])
+            let (data, response) = try await PublishedStream.request(remote, headers: upstreamHeaders)
             var body = data
             var mime = response.mimeType ?? "application/octet-stream"
             if let playlist = String(data: data, encoding: .utf8), playlist.hasPrefix("#EXTM3U") {
