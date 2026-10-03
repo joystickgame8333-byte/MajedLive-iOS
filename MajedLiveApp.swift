@@ -5,6 +5,10 @@ import AVKit
 
 @main
 struct MajedLiveApp: App {
+    @UIApplicationDelegateAdaptor(UpdateNotificationDelegate.self) private var notificationDelegate
+    @StateObject private var updates = AppUpdates()
+    @StateObject private var notifications = UpdateNotifications.shared
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
     @AppStorage("theme") private var themeName = AppTheme.ruby.rawValue
     private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .ruby }
@@ -12,10 +16,22 @@ struct MajedLiveApp: App {
     var body: some Scene {
         WindowGroup {
             FootballShell()
+                .environmentObject(updates)
                 .environment(\.layoutDirection, .rightToLeft)
                 .environment(\.appTheme, theme)
                 .tint(theme.accent)
                 .preferredColorScheme(Appearance(rawValue: appearance)?.colorScheme)
+                .sheet(isPresented: $notifications.showUpdateSettings) {
+                    SettingsScreen(updates: updates)
+                        .environment(\.layoutDirection, .rightToLeft)
+                        .environment(\.appTheme, theme)
+                        .task { await updates.check() }
+                }
+                .task { await notifications.refreshStatus() }
+                .onChange(of: scenePhase) { phase in
+                    if phase == .background { notifications.schedule() }
+                    if phase == .active { Task { await notifications.refreshStatus() } }
+                }
         }
     }
 }
@@ -356,8 +372,7 @@ final class AppUpdates: ObservableObject {
     @Published private(set) var installing = false
     @Published var notice: String?
     private var lastCheck: Date?
-    private let endpoint = URL(string: "https://api.github.com/repos/joystickgame8333-byte/MajedLive-iOS/releases/latest")!
-    let installedBuild = Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1") ?? 1
+    let installedBuild = ReleaseClient.installedBuild
 
     func check(manual: Bool = false) async {
         guard !checking else { return }
@@ -365,24 +380,15 @@ final class AppUpdates: ObservableObject {
         lastCheck = Date()
         checking = true
         defer { checking = false }
-        var request = URLRequest(url: endpoint)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("MajedLive-iOS", forHTTPHeaderField: "User-Agent")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 15
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let release = try await ReleaseClient.latest()
             guard !Task.isCancelled else { return }
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                if manual { notice = "تعذّر التحقق من التحديثات الآن. حاول لاحقًا." }
-                return
-            }
-            let release = try JSONDecoder().decode(AppRelease.self, from: data)
             guard let build = release.build, release.ipa != nil else {
                 if manual { notice = "لم تتوفر نسخة صالحة للتحديث بعد." }
                 return
             }
             available = build > installedBuild ? release : nil
+            UpdateNotifications.shared.clearInstalledUpdate()
             if manual && available == nil { notice = "أنت تستخدم أحدث نسخة متاحة." }
         } catch {
             if manual && !Task.isCancelled { notice = "تعذّر الاتصال بخدمة التحديثات. تحقق من الإنترنت وحاول مجددًا." }
@@ -413,7 +419,7 @@ struct MatchesScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
     @StateObject private var model = ScheduleModel()
-    @StateObject private var updates = AppUpdates()
+    @EnvironmentObject private var updates: AppUpdates
     @AppStorage("selectedLeague") private var selectedLeague = LeagueFilter.all
     @AppStorage("selectedLeagueTitle") private var selectedLeagueTitle = "كل الدوريات"
     @State private var showingSettings = false
@@ -615,7 +621,12 @@ struct SettingsScreen: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 20) { appearancePicker; themePicker; updateControls }.padding(20)
+                VStack(spacing: 20) {
+                    appearancePicker
+                    themePicker
+                    UpdateNotificationControls()
+                    updateControls
+                }.padding(20)
             }
             .background(colors.background)
             .navigationTitle("الإعدادات")

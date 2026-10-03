@@ -107,6 +107,29 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(playback.servers.count, 2)
     }
 
+    func testUpdateAlertsRequirePublishedIPAAndSkipInstalledOrAlreadyNotifiedBuilds() throws {
+        func release(build: String = "build-20", draft: Bool = false,
+                     prerelease: Bool = false, assets: Bool = true,
+                     url: String = "https://github.com/joystickgame8333-byte/MajedLive-iOS/releases/download/build-20/MajedLive.ipa") throws -> AppRelease {
+            let payload: [String: Any] = [
+                "tag_name": build, "draft": draft, "prerelease": prerelease,
+                "assets": assets ? [["name": "MajedLive.ipa", "browser_download_url": url]] : []
+            ]
+            return try JSONDecoder().decode(AppRelease.self, from: JSONSerialization.data(withJSONObject: payload))
+        }
+        let published = try release()
+        XCTAssertEqual(UpdateNotificationPolicy.newBuild(published, installed: 19, notified: 18), 20)
+        XCTAssertNil(UpdateNotificationPolicy.newBuild(published, installed: 20, notified: 18))
+        XCTAssertNil(UpdateNotificationPolicy.newBuild(published, installed: 21, notified: 18))
+        XCTAssertNil(UpdateNotificationPolicy.newBuild(published, installed: 19, notified: 20))
+        XCTAssertNil(UpdateNotificationPolicy.newBuild(published, installed: 19, notified: 21))
+        for invalid in [try release(draft: true), try release(prerelease: true), try release(assets: false),
+                        try release(build: "preview-20"),
+                        try release(url: "https://github.com/other/repo/releases/download/build-20/MajedLive.ipa")] {
+            XCTAssertNil(UpdateNotificationPolicy.newBuild(invalid, installed: 19, notified: 18))
+        }
+    }
+
     func testFajrSourcesKeepFreshPublishedSignaturesAndRejectUnsafeURLs() {
         let html = #"src: "https://vstream6.hadara.ps:8443/live/playlist.m3u8?sig=fresh&amp;id=1", src: "http://vstream6.hadara.ps/live/playlist.m3u8", src: "https://other.example/live/playlist.m3u8", src: "https://vstream6.hadara.ps:8443/live/playlist.m3u8?sig=fresh&amp;id=1""#
         let sources = FajrStream.candidates(html: html)

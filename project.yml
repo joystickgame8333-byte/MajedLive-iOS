@@ -18,6 +18,7 @@ targets:
       - path: StreamPlayback.swift
       - path: FootballShell.swift
       - path: FajrPlayback.swift
+      - path: UpdateNotifications.swift
       - path: Assets.xcassets
     settings:
       base:
@@ -29,6 +30,10 @@ targets:
         CFBundleDisplayName: الكرة عمر
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.majedlive.demo.iphone.update-refresh
+        UIBackgroundModes:
+          - fetch
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           NSExceptionDomains:
