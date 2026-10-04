@@ -19,6 +19,11 @@ targets:
       - path: FootballShell.swift
       - path: FajrPlayback.swift
       - path: UpdateNotifications.swift
+      - path: NTVProvider.swift
+      - path: UnifiedPlayer.swift
+      - path: EmbeddedPlayer.swift
+      - path: MatchesScreen.swift
+      - path: ChannelsScreen.swift
       - path: Assets.xcassets
     settings:
       base:

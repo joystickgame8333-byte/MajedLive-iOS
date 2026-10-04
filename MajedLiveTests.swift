@@ -2,6 +2,69 @@ import XCTest
 @testable import MajedLive
 
 final class MajedLiveTests: XCTestCase {
+    func testNTVFootballCategoryDayBoundaryAndLivePrecedence() throws {
+        let start = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-04T21:30:00Z"))
+        func event(_ id: String, category: String = "football", live: Bool = false, date: Double? = nil) -> [String: Any] {
+            ["id": id, "title": "Home vs Away", "category": category,
+             "date": date ?? start.timeIntervalSince1970 * 1000, "live": live,
+             "teams": ["home": ["name": "Home"], "away": ["name": "Away"]],
+             "sources": [["source": "alpha", "id": "published-id"]]]
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["success": true,
+            "live": [event("one", live: true)],
+            "all": [event("one"), event("basket", category: "basketball"),
+                    event("american", category: "american-football"), event("channel", date: 0)]])
+        let catalog = try JSONDecoder().decode(NTVProvider.Catalog.self, from: data)
+        XCTAssertTrue(try NTVProvider.football(catalog, date: "2026-10-04").isEmpty)
+        let result = try NTVProvider.football(catalog, date: "2026-10-05")
+        XCTAssertEqual(result.count, 1)
+        let match = try XCTUnwrap(result.first)
+        XCTAssertEqual(match.providerID, "ntv")
+        XCTAssertEqual(match.id, "ntv:one")
+        XCTAssertTrue(match.isLive)
+        XCTAssertEqual(match.time, "00:30")
+        XCTAssertFalse(match.hasScore)
+        XCTAssertNil(match.clockText())
+        XCTAssertEqual(match.playbackURL?.path, "/watch/kobra/one")
+    }
+
+    func testNTVExtractsOnlyPublishedPlayerAndPreservesQuery() throws {
+        let page = try XCTUnwrap(URL(string: "https://ntv.cx/watch/kobra/match"))
+        let html = """
+        <iframe id="advertisement" src="https://ads.example/frame"></iframe>
+        <select id="streamSelect"><option value="/embed?t=fresh&amp;lang=en">English</option>
+        <option value="/embed?t=fresh&amp;lang=en">Duplicate</option>
+        <option value="javascript:alert(1)">Unsafe</option></select>
+        """
+        let servers = NTVProvider.embedServers(html: html, page: page)
+        XCTAssertEqual(servers.count, 1)
+        XCTAssertEqual(servers.first?.playbackURL?.absoluteString, "https://ntv.cx/embed?t=fresh&lang=en")
+        let channel = NTVProvider.embedServers(html: "<iframe id='streamPlayer' src='https://example.com/published'></iframe>", page: page)
+        XCTAssertEqual(channel.first?.playbackURL?.host, "example.com")
+        XCTAssertTrue(NTVProvider.embedServers(html: "<iframe src='https://ads.example'></iframe>", page: page).isEmpty)
+    }
+
+    func testQualitySelectionPreservesAudioAndSignedVariantURLs() {
+        let master = """
+        #EXTM3U
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Main",DEFAULT=YES,URI="audio.m3u8?sig=audio"
+        #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO="audio",VIDEO="missing"
+        high.m3u8?sig=high
+        #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO="audio"
+        medium.m3u8?sig=medium
+        """
+        XCTAssertEqual(HLSQuality.choices(master).map(\.id), [0, 1080, 720])
+        let selected = HLSQuality.master(master, height: 720)
+        XCTAssertTrue(selected.contains("medium.m3u8?sig=medium"))
+        XCTAssertTrue(selected.contains("audio.m3u8?sig=audio"))
+        XCTAssertTrue(selected.contains("AUDIO=\"audio\""))
+        XCTAssertFalse(selected.contains("high.m3u8"))
+        let automatic = HLSQuality.master(master, height: 0)
+        XCTAssertEqual(HLSQuality.variants(automatic).count, 2)
+        XCTAssertFalse(automatic.contains("VIDEO=\"missing\""))
+        XCTAssertEqual(HLSQuality.choices("#EXTM3U\n#EXTINF:2\nsegment.ts").map(\.label), ["جودة المصدر"])
+    }
+
     private func match(ready: Bool = true, available: Bool = true, enabled: Bool = true, url: String = "https://majed-koora.live/watch.html?id=42", state: String = "upcoming", elapsed: Int? = nil, syncedAt: Double? = nil, leagueID: String = "cup1", homeScore: Int? = nil, awayScore: Int? = nil, broadcast: [String: Any]? = nil, stadium: String? = nil, round: String? = nil) throws -> Match {
         var payload: [String: Any] = [
             "id": "42", "date": "2026-09-30", "time": "19:00", "state": state,

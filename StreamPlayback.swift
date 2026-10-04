@@ -140,12 +140,14 @@ final class LiveHLSRelay {
     private var connections: [NWConnection] = []
     private let secret = UUID().uuidString
     private let source: URL
+    private let rootPlaylist: String?
     private let upstreamHeaders: [String: String]
     private var port: UInt16 = 0
     var onFailure: ((Error) -> Void)?
     var onRequest: ((String) -> Void)?
-    init(source: URL, headers: [String: String] = ["Origin": "https://player.majed-koora.live"]) {
+    init(source: URL, headers: [String: String] = ["Origin": "https://player.majed-koora.live"], rootPlaylist: String? = nil) {
         self.source = source
+        self.rootPlaylist = rootPlaylist
         self.upstreamHeaders = headers
     }
     func start() async throws -> URL {
@@ -211,9 +213,16 @@ final class LiveHLSRelay {
         onRequest?(["css", "m3u8"].contains(remote.pathExtension.lowercased()) ? "قائمة البث" : "مقطع الفيديو")
         do {
             // All URLs retain the original site's signatures; no authentication is replaced.
-            let (data, response) = try await PublishedStream.request(remote, headers: upstreamHeaders)
+            let data: Data
+            var mime = "application/octet-stream"
+            if remote == source, let rootPlaylist, !HLSQuality.variants(rootPlaylist).isEmpty {
+                data = Data(rootPlaylist.utf8)
+            } else {
+                let response = try await PublishedStream.request(remote, headers: upstreamHeaders)
+                data = response.0
+                mime = response.1.mimeType ?? mime
+            }
             var body = data
-            var mime = response.mimeType ?? "application/octet-stream"
             if let playlist = String(data: data, encoding: .utf8), playlist.hasPrefix("#EXTM3U") {
                 body = Data(HLSPlaylist.rewrite(playlist, base: remote, map: localURL).utf8)
                 mime = "application/vnd.apple.mpegurl"
@@ -273,136 +282,3 @@ final class LiveHLSRelay {
 
 }
 
-@MainActor
-final class OriginalPlayerModel: ObservableObject {
-    @Published var player: AVPlayer?
-    @Published var loading = true
-    @Published var error: String?
-    @Published var stage = "تصريح الموقع"
-    @Published var details = ""
-    @Published var mediaRequests = 0
-    @Published var lastRequest = "لم يطلب المشغّل بيانات بعد"
-    private var readinessTimeout: Task<Void, Never>?
-    private static func errorCode(_ error: Error) -> String {
-        var result: [String] = []
-        var current: NSError? = error as NSError
-        for _ in 0..<4 {
-            guard let value = current else { break }
-            // Never expose signed source URLs or authorization from error userInfo.
-            let domain = value.domain.range(of: "^[A-Za-z0-9_.-]+$", options: .regularExpression) != nil ? value.domain : "MediaError"
-            result.append("\(domain): \(value.code)")
-            current = value.userInfo[NSUnderlyingErrorKey] as? NSError
-        }
-        return result.joined(separator: " → ")
-    }
-    private var relay: LiveHLSRelay?
-    private var observation: NSKeyValueObservation?
-    func start(server: URL, watch: URL) async {
-        stop(); loading = true; error = nil; stage = "تصريح الموقع"; details = ""; mediaRequests = 0; lastRequest = "لم يطلب المشغّل بيانات بعد"
-        do {
-            let master = try await PublishedStream.resolve(player: server, watch: watch)
-            stage = "قائمة البث"
-            let (data, _) = try await PublishedStream.request(master, headers: ["Origin": "https://player.majed-koora.live"])
-            guard let playlist = String(data: data, encoding: .utf8), playlist.hasPrefix("#EXTM3U") else {
-                throw APIError.server("السيرفر لم يرسل قائمة بث صالحة.")
-            }
-            let selected = HLSPlaylist.compatibleVariant(playlist, base: master)
-            let relay = LiveHLSRelay(source: selected)
-            self.relay = relay
-            relay.onFailure = { [weak self] failure in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.details = "تحميل مقاطع البث: " + ((failure as? APIError)?.errorDescription ?? Self.errorCode(failure))
-                }
-            }
-            stage = "اتصال المشغّل داخل التطبيق"
-            let local = try await relay.start()
-            // Test the same loopback playlist AVPlayer will request before starting it.
-            let (localData, _) = try await PublishedStream.request(local)
-            guard String(data: localData, encoding: .utf8)?.hasPrefix("#EXTM3U") == true else {
-                throw APIError.server("لم تصل قائمة البث إلى المشغّل داخل التطبيق.")
-            }
-            try Task.checkCancellation()
-            relay.onRequest = { [weak self] resource in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.mediaRequests += 1; self.lastRequest = resource
-                }
-            }
-            stage = "تشغيل الفيديو"
-            let item = AVPlayerItem(url: local)
-            observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if item.status == .readyToPlay { self.loading = false; self.readinessTimeout?.cancel() }
-                    if item.status == .failed {
-                        self.loading = false
-                        self.readinessTimeout?.cancel()
-                        self.error = "تعذّر تشغيل الفيديو بمشغّل آيفون."
-                        if let failure = item.error { self.details = Self.errorCode(failure) + "\n" + self.details }
-                        if let event = item.errorLog()?.events.last {
-                            self.details += "\nHLS: \(event.errorStatusCode)"
-                        }
-                    }
-                }
-            }
-            let player = AVPlayer(playerItem: item)
-            self.player = player
-            player.play()
-            readinessTimeout = Task { [weak self] in
-                do { try await Task.sleep(nanoseconds: 25_000_000_000) } catch { return }
-                guard let self, self.loading else { return }
-                self.loading = false
-                self.error = "انتهت مهلة تجهيز الفيديو."
-                if let event = item.errorLog()?.events.last { self.details += "\nHLS: \(event.errorStatusCode)" }
-            }
-        } catch {
-            relay?.stop(); relay = nil
-            loading = false
-            if !(error is CancellationError) {
-                self.error = (error as? APIError)?.errorDescription ?? "تعذّر تجهيز البث. أعد المحاولة."
-                details = Self.errorCode(error) + (details.isEmpty ? "" : "\n" + details)
-            }
-        }
-    }
-    func stop() {
-        readinessTimeout?.cancel(); readinessTimeout = nil
-        observation = nil
-        player?.pause(); player?.replaceCurrentItem(with: nil); player = nil
-        relay?.stop(); relay = nil
-    }
-}
-
-struct OriginalPlayerScreen: View {
-    let server: URL
-    let watch: URL
-    @StateObject private var model = OriginalPlayerModel()
-    @State private var retryID = UUID()
-    var body: some View {
-        ZStack {
-            VideoPlayer(player: model.player)
-            if model.loading {
-                VStack(spacing: 12) {
-                    ProgressView("جاري تجهيز تشغيل آيفون…")
-                    Text(model.stage).font(.caption)
-                }.tint(.white).foregroundStyle(.white)
-            }
-            if let error = model.error {
-                Color.black
-                VStack(spacing: 18) {
-                    Text(error).multilineTextAlignment(.center)
-                    Text("المرحلة: " + model.stage).font(.caption)
-                    Text("طلبات المشغّل: \(model.mediaRequests) · \(model.lastRequest)").font(.caption)
-                    Text(model.details).font(.caption.monospaced()).multilineTextAlignment(.center)
-                        .environment(\.layoutDirection, .leftToRight)
-                    Button("نسخ تفاصيل الخطأ") {
-                        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
-                        UIPasteboard.general.string = "Build \(build)\n\(model.stage)\n\(error)\nRequests: \(model.mediaRequests) · \(model.lastRequest)\n\(model.details)"
-                    }
-                    Button("إعادة المحاولة") { retryID = UUID() }.buttonStyle(.borderedProminent)
-                }.foregroundStyle(.white).padding(24)
-            }
-        }.task(id: retryID) { await model.start(server: server, watch: watch) }
-            .onDisappear { model.stop() }
-    }
-}

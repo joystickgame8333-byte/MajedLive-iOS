@@ -193,6 +193,9 @@ enum MatchInformation {
 
 struct Match: Decodable, Identifiable {
     let id: String
+    let provider: String?
+    var providerID: String { provider ?? "majed" }
+    var providerTitle: String { providerID == "ntv" ? "NTV" : "ماجد لايف" }
     let date: String
     let time: String
     let state: String
@@ -226,7 +229,7 @@ struct Match: Decodable, Identifiable {
         return url
     }
     var isLive: Bool { state == "live" || state == "halftime" }
-    var hasScore: Bool { isLive || state == "finished" }
+    var hasScore: Bool { (isLive || state == "finished") && (home_team.score != nil || away_team.score != nil) }
     var scoreText: String {
         let home = home_team.score.map(String.init) ?? "—"
         let away = away_team.score.map(String.init) ?? "—"
@@ -289,7 +292,6 @@ final class ScheduleModel: ObservableObject {
     @Published var updated: Date?
     @Published var displayedDate = ""
     private var requestID = UUID()
-    let api = MatchesAPI()
 
     func refresh(offset: Int, clear: Bool = false) async {
         let date = Site.date(offset: offset)
@@ -298,15 +300,15 @@ final class ScheduleModel: ObservableObject {
         if clear || date != displayedDate { matches = []; updated = nil }
         loading = true
         error = nil
-        do {
-            let result = try await api.load(date: date)
-            guard !Task.isCancelled, requestID == id else { return }
-            matches = result
+        let result = await FootballSchedule.load(date: date)
+        guard !Task.isCancelled, requestID == id else { return }
+        if result.unavailable.count < 2 {
+            matches = result.matches
             displayedDate = date
             updated = Date()
-        } catch {
-            guard !Task.isCancelled, requestID == id else { return }
-            self.error = "لم نتمكن من تحديث الجدول. تحقق من الإنترنت ثم أعد المحاولة."
+        }
+        if !result.unavailable.isEmpty {
+            error = "تعذّر تحديث " + result.unavailable.joined(separator: " و ") + ". اسحب لإعادة المحاولة."
         }
         if requestID == id { loading = false }
     }
@@ -449,207 +451,12 @@ final class AppUpdates: ObservableObject {
     }
 }
 
-struct MatchesScreen: View {
-    @Environment(\.appTheme) private var appTheme
-    @Environment(\.colorScheme) private var colorScheme
-    private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
-    @StateObject private var model = ScheduleModel()
-    @EnvironmentObject private var updates: AppUpdates
-    @AppStorage("selectedLeague") private var selectedLeague = LeagueFilter.all
-    @AppStorage("selectedLeagueTitle") private var selectedLeagueTitle = "كل الدوريات"
-    @State private var showingSettings = false
-    @State private var day = 0
-    @State private var playback: Playback?
-    @State private var sourceSelection: BroadcastSelection?
-    @State private var pendingPlayback: Playback?
-    @State private var checkingMatch: String?
-    @State private var message: String?
-    @Environment(\.scenePhase) private var scenePhase
-
-    private var filteredMatches: [Match] { LeagueFilter.matches(model.matches, selected: selectedLeague) }
-    private var leagues: [Competition] {
-        var seen = Set<String>()
-        return model.matches.map(\.tournament).filter { seen.insert($0.filterKey).inserted }
-            .sorted { $0.name.localizedCompare($1.name) == .orderedAscending }
-    }
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    Picker("اختيار اليوم", selection: $day) {
-                        Text("اليوم").tag(0)
-                        Text("غدًا").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("dayPicker")
-                    leaguePicker
-                    HStack {
-                        Text(day == 0 ? "مباريات اليوم" : "مباريات غدًا")
-                            .font(.title2.bold())
-                        Spacer()
-                        Text("\(filteredMatches.count) مباريات")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let error = model.error {
-                        VStack(spacing: 12) {
-                            Label(error, systemImage: "wifi.exclamationmark")
-                            Button("إعادة المحاولة") { Task { await model.refresh(offset: day) } }
-                        }.font(.subheadline).padding().frame(maxWidth: .infinity)
-                            .background(colors.card, in: RoundedRectangle(cornerRadius: 20))
-                    }
-                    if model.loading && model.matches.isEmpty {
-                        ProgressView("جاري تحميل المباريات…")
-                            .frame(maxWidth: .infinity).padding(.vertical, 60)
-                    } else if filteredMatches.isEmpty && model.error == nil {
-                        VStack(spacing: 14) {
-                            Image(systemName: "sportscourt").font(.largeTitle).foregroundStyle(colors.accent)
-                            Text(selectedLeague == LeagueFilter.all ? "لا توجد مباريات لهذا اليوم" : "لا توجد مباريات لهذا الدوري اليوم").font(.headline)
-                            Text("اسحب للأسفل لتحديث الجدول").font(.subheadline).foregroundStyle(.secondary)
-                        }.frame(maxWidth: .infinity).padding(.vertical, 55)
-                    } else {
-                        LazyVStack(spacing: 16) {
-                            ForEach(filteredMatches) { match in
-                                MatchCard(match: match, checking: checkingMatch == match.id) {
-                                    Task { await open(match) }
-                                }.disabled(checkingMatch != nil)
-                            }
-                        }
-                    }
-                    if let updated = model.updated {
-                        Text("آخر تحديث: \(updated.formatted(date: .omitted, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 12)
-                    }
-                }.padding(20)
-            }
-            .background(colors.background)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                header.padding(.horizontal, 20)
-                    .background(colors.card.ignoresSafeArea(edges: .top))
-                    .overlay(alignment: .bottom) { Rectangle().fill(colors.accent.opacity(0.12)).frame(height: 1) }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if updates.available != nil {
-                    HStack(spacing: 10) {
-                        Image(systemName: "arrow.down.circle.fill").foregroundStyle(colors.accent)
-                        Text("تحديث جديد متاح").font(.subheadline.weight(.medium))
-                        Spacer(minLength: 8)
-                        Button { updates.install() } label: {
-                            if updates.installing { ProgressView() }
-                            else { Text("تحديث").font(.subheadline.bold()) }
-                        }.disabled(updates.installing)
-                    }
-                    .padding(.horizontal, 16).padding(.vertical, 12)
-                    .background(colors.card, in: RoundedRectangle(cornerRadius: 16))
-                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(colors.accent.opacity(0.2), lineWidth: 1))
-                    .padding(.horizontal, 20).padding(.vertical, 8)
-                    .background(colors.background)
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-            .refreshable { await model.refresh(offset: day) }
-            .task(id: "\(day)-\(scenePhase == .active)-\(playback == nil)") {
-                guard scenePhase == .active, playback == nil else { return }
-                Task { await updates.check() }
-                await model.refresh(offset: day)
-                while !Task.isCancelled {
-                    do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
-                    await model.refresh(offset: day)
-                    Task { await updates.check() }
-                }
-            }
-            .onChange(of: day) { _ in model.matches = []; model.updated = nil }
-            .sheet(isPresented: $showingSettings) { SettingsScreen(updates: updates) }
-            .sheet(item: $sourceSelection, onDismiss: {
-                playback = pendingPlayback
-                pendingPlayback = nil
-            }) { selection in
-                BroadcastSelectionScreen(selection: selection) { chosen in pendingPlayback = chosen }
-            }
-            .fullScreenCover(item: $playback) { selected in PlayerScreen(playback: selected) }
-            .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
-                Button("حسنًا", role: .cancel) { message = nil }
-            } message: { Text(message ?? "") }
-            .alert("تحديث التطبيق", isPresented: Binding(get: { !showingSettings && updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
-                Button("حسنًا", role: .cancel) { updates.notice = nil }
-            } message: { Text(updates.notice ?? "") }
-
-        }
-    }
-
-    private var leaguePicker: some View {
-        Menu {
-            Button { selectedLeague = LeagueFilter.all; selectedLeagueTitle = "كل الدوريات" } label: {
-                if selectedLeague == LeagueFilter.all { Label("إظهار الكل", systemImage: "checkmark") }
-                else { Text("إظهار الكل") }
-            }
-            ForEach(leagues, id: \.filterKey) { league in
-                Button { selectedLeague = league.filterKey; selectedLeagueTitle = league.name } label: {
-                    if selectedLeague == league.filterKey { Label(league.name, systemImage: "checkmark") }
-                    else { Text(league.name) }
-                }
-            }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "line.3.horizontal.decrease.circle").foregroundStyle(colors.accent)
-                Text(selectedLeague == LeagueFilter.all ? "كل الدوريات" : selectedLeagueTitle)
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.primary).lineLimit(2)
-                Spacer()
-                Image(systemName: "chevron.down").font(.caption.bold()).foregroundStyle(.secondary)
-            }.padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 14))
-        }.accessibilityLabel("اختيار الدوري")
-            .accessibilityIdentifier("leaguePicker")
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12).fill(colors.accent).frame(width: 40, height: 40)
-                Image(systemName: "soccerball").font(.system(size: 23)).foregroundStyle(.white)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(FootballBrand.name).font(.title3.bold())
-                Text("المباريات ومصادر البث").font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 4)
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape").font(.title3).padding(10)
-                    .overlay(alignment: .topTrailing) {
-                        if updates.available != nil {
-                            Circle().fill(colors.accent).frame(width: 8, height: 8)
-                        }
-                    }
-            }.accessibilityLabel(updates.available == nil ? "الإعدادات" : "الإعدادات، تحديث جديد متاح")
-        }.padding(.vertical, 8)
-    }
-
-    @MainActor private func open(_ match: Match) async {
-        guard checkingMatch == nil else { return }
-        checkingMatch = match.id
-        defer { checkingMatch = nil }
-        do {
-            // Recheck availability on every tap; a previously published link can expire.
-            let fresh = try await model.api.load(date: match.date)
-            guard let current = fresh.first(where: { $0.id == match.id }) else {
-                message = "هذه المباراة لم تعد موجودة في الجدول الحالي."
-                await model.refresh(offset: day)
-                return
-            }
-            let sources = try await BroadcastCatalog.sources(for: current)
-            guard !sources.isEmpty else { message = "لا توجد مصادر بث متاحة لهذه المباراة حاليًا."; return }
-            pendingPlayback = nil
-            sourceSelection = BroadcastSelection(title: "\(current.home_team.name) × \(current.away_team.name)", sources: sources)
-        } catch {
-            message = (error as? APIError)?.errorDescription ?? "تعذّر التحقق من البث. تأكد من الإنترنت وحاول مجددًا."
-        }
-    }
-}
-
 struct SettingsScreen: View {
     @Environment(\.appTheme) private var appTheme
     @Environment(\.colorScheme) private var colorScheme
     private var colors: ThemeColors { ThemeColors(theme: appTheme, dark: colorScheme == .dark) }
     @ObservedObject var updates: AppUpdates
+    var standalone = false
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
     @AppStorage("theme") private var themeName = AppTheme.ruby.rawValue
     @Environment(\.dismiss) private var dismiss
@@ -666,7 +473,7 @@ struct SettingsScreen: View {
             .background(colors.background)
             .navigationTitle("الإعدادات")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("تم") { dismiss() } } }
+            .toolbar { if !standalone { ToolbarItem(placement: .confirmationAction) { Button("تم") { dismiss() } } } }
             .alert("تحديث التطبيق", isPresented: Binding(get: { updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
                 Button("حسنًا", role: .cancel) { updates.notice = nil }
             } message: { Text(updates.notice ?? "") }
@@ -771,7 +578,7 @@ struct MatchCard: View {
         VStack(spacing: 18) {
             HStack(spacing: 8) {
                 RemoteLogo(path: match.tournament.logo, size: 20)
-                Text(match.tournament.name).font(.caption).foregroundStyle(.secondary)
+                Text(match.providerTitle).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 if match.isLive {
                     Label("مباشر", systemImage: "dot.radiowaves.left.and.right")
@@ -809,14 +616,14 @@ struct MatchCard: View {
             matchInformation
             Button(action: action) {
                 HStack(spacing: 8) {
-                    if checking { ProgressView().tint(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent : .white) }
-                    else { Image(systemName: match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? "clock" : "play.fill") }
-                    Text(checking ? "جاري التحقق…" : match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? "البث لم يُنشر بعد" : "اختيار البث")
+                    if checking { ProgressView().tint(match.playbackURL == nil ? colors.accent : .white) }
+                    else { Image(systemName: match.playbackURL == nil ? "clock" : "play.fill") }
+                    Text(checking ? "جاري التحقق…" : match.playbackURL == nil ? "البث لم يُنشر بعد" : "شاهد المباراة")
                         .font(.subheadline.bold())
                 }.frame(maxWidth: .infinity).padding(.vertical, 13)
-                    .foregroundStyle(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent : .white)
-                    .background(match.playbackURL == nil && ChannelCatalog.channels.isEmpty ? colors.accent.opacity(0.08) : colors.accent, in: RoundedRectangle(cornerRadius: 13))
-            }.buttonStyle(.plain).accessibilityIdentifier("watch-\(match.id)")
+                    .foregroundStyle(match.playbackURL == nil ? colors.accent : .white)
+                    .background(match.playbackURL == nil ? colors.accent.opacity(0.08) : colors.accent, in: RoundedRectangle(cornerRadius: 13))
+            }.buttonStyle(.plain).disabled(match.playbackURL == nil).accessibilityIdentifier("watch-\(match.id)")
         }.padding(18).background(colors.card, in: RoundedRectangle(cornerRadius: 22))
     }
     private var matchInformation: some View {
@@ -875,239 +682,3 @@ struct MatchCard: View {
     }
 }
 
-@MainActor
-final class PlayerState: ObservableObject {
-    @Published var loading = true
-    @Published var error: String?
-    weak var webView: WKWebView?
-    func retry() {
-        error = nil
-        loading = true
-        webView?.reload()
-    }
-}
-
-struct PlayerScreen: View {
-    let playback: Playback
-    @StateObject private var state = PlayerState()
-    @State private var selectedID: String?
-    init(playback: Playback) {
-        self.playback = playback
-        _selectedID = State(initialValue: playback.initialServerID)
-    }
-    @State private var preferNativeHLS = true
-    @State private var originalPlayback = true
-    @State private var reloadID = UUID()
-    private var selected: StreamServer {
-        playback.servers.first(where: { $0.id == selectedID })
-            ?? playback.servers.first(where: { $0.is_default == true })
-            ?? playback.servers[0]
-    }
-    private var supportsOriginalPlayer: Bool {
-        selected.playbackURL?.host == "player.majed-koora.live" && !selected.nativeVideo
-    }
-    private var supportsFajrPlayer: Bool { selected.type == "fajr_hls_page" }
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button { dismiss() } label: { Image(systemName: "xmark").padding(12) }
-                    .accessibilityLabel("إغلاق المشغّل")
-                Text(playback.title).font(.subheadline.bold()).lineLimit(1)
-                Spacer(minLength: 0)
-                Button { if selected.nativeVideo || ((supportsOriginalPlayer || supportsFajrPlayer) && originalPlayback) { reloadID = UUID() } else { state.retry() } } label: { Image(systemName: "arrow.clockwise").padding(12) }
-                    .accessibilityLabel("تحديث المشغّل")
-            }.foregroundStyle(.white).background(Color.black)
-            if supportsOriginalPlayer || supportsFajrPlayer {
-                HStack {
-                    Text(originalPlayback ? (supportsFajrPlayer ? "الفجر · مشغّل آيفون" : "مشغّل آيفون الأصلي · حتى 720p") : "مشغّل الموقع")
-                        .font(.caption).foregroundStyle(.white.opacity(0.7))
-                    Spacer()
-                    Button(originalPlayback ? "مشغّل الموقع" : "تشغيل آيفون") {
-                        state.error = nil; state.loading = true
-                        originalPlayback.toggle()
-                    }.font(.caption.bold())
-                }.padding(.horizontal, 16).padding(.vertical, 8)
-            }
-            if !selected.nativeVideo && (!(supportsOriginalPlayer || supportsFajrPlayer) || !originalPlayback) {
-                HStack(spacing: 8) {
-                    Text(preferNativeHLS ? "تشغيل متوافق مع آيفون" : "محرك الموقع")
-                        .font(.caption).foregroundStyle(.white.opacity(0.7))
-                    Spacer()
-                    Button(preferNativeHLS ? "تجربة محرك الموقع" : "تشغيل آيفون") {
-                        state.error = nil
-                        state.loading = true
-                        preferNativeHLS.toggle()
-                    }.font(.caption.bold())
-                }.padding(.horizontal, 16).padding(.vertical, 8)
-            }
-            HStack {
-                Label(playback.providerName, systemImage: "play.tv.fill")
-                    .font(.caption).foregroundStyle(.white.opacity(0.7))
-                Spacer()
-                Menu {
-                    ForEach(playback.servers) { server in
-                        Button { selectedID = server.id } label: {
-                            if selected.id == server.id { Label(server.name, systemImage: "checkmark") }
-                            else { Text(server.name) }
-                        }
-                    }
-                } label: {
-                    Label("تغيير البث", systemImage: "arrow.triangle.2.circlepath").font(.caption.bold())
-                }
-            }.padding(.horizontal, 16).padding(.vertical, 8)
-            ZStack {
-                if let url = selected.playbackURL {
-                    if selected.nativeVideo { NativeVideoPlayer(url: url).id("\(selected.id)-\(reloadID)") }
-                    else if supportsFajrPlayer && originalPlayback {
-                        FajrPlayerScreen(page: url).id("\(selected.id)-\(reloadID)")
-                    }
-                    else if supportsOriginalPlayer && originalPlayback {
-                        OriginalPlayerScreen(server: url, watch: playback.url).id("\(selected.id)-\(reloadID)")
-                    }
-                    else { PlayerWebView(url: url, referrer: playback.url, preferNativeHLS: preferNativeHLS, state: state).id("\(selected.id)-\(preferNativeHLS)") }
-                }
-                if !selected.nativeVideo && !((supportsOriginalPlayer || supportsFajrPlayer) && originalPlayback) && state.loading && state.error == nil {
-                    Color.black
-                    ProgressView("جاري تشغيل البث…").tint(.white).foregroundStyle(.white)
-                }
-                if let error = state.error {
-                    Color.black
-                    VStack(spacing: 20) {
-                        Image(systemName: "wifi.exclamationmark").font(.largeTitle)
-                        Text(error).multilineTextAlignment(.center)
-                        Button("إعادة المحاولة") { state.retry() }.buttonStyle(.borderedProminent)
-                    }.foregroundStyle(.white).padding(30)
-                }
-            }
-        }.background(Color.black).statusBarHidden()
-            .onChange(of: selectedID) { _ in state.error = nil; state.loading = true }
-    }
-}
-
-struct NativeVideoPlayer: View {
-    let url: URL
-    @State private var player: AVPlayer?
-    var body: some View {
-        VideoPlayer(player: player)
-            .onAppear { player = AVPlayer(url: url); player?.play() }
-            .onDisappear { player?.pause(); player = nil }
-    }
-}
-
-struct PlayerWebView: UIViewRepresentable {
-    let url: URL
-    let referrer: URL
-    let preferNativeHLS: Bool
-    let state: PlayerState
-    func makeCoordinator() -> Coordinator { Coordinator(url: url, state: state) }
-    func makeUIView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        configuration.allowsInlineMediaPlayback = true
-        configuration.allowsAirPlayForMediaPlayback = true
-        configuration.allowsPictureInPictureMediaPlayback = true
-        configuration.mediaTypesRequiringUserActionForPlayback = []
-        if preferNativeHLS {
-            // Prefer Apple's supported HLS path in the published player's adapter.
-            // This changes only media engine selection, not URLs, access or DRM.
-            let nativeHLS = """
-            (function () {
-                if (location.hostname !== 'player.majed-koora.live') return;
-                var appleMobile = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
-                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-                var probe = document.createElement('video');
-                if (!appleMobile || !(probe.canPlayType('application/vnd.apple.mpegurl') ||
-                    probe.canPlayType('application/x-mpegurl'))) return;
-                var library;
-                function preferNative(value) {
-                    if (value && typeof value.isSupported === 'function') {
-                        value.isSupported = function () { return false; };
-                    }
-                    return value;
-                }
-                var descriptor = Object.getOwnPropertyDescriptor(window, 'Hls');
-                if (descriptor && !descriptor.configurable) return;
-                library = preferNative(window.Hls);
-                Object.defineProperty(window, 'Hls', {
-                    configurable: true,
-                    get: function () { return library; },
-                    set: function (value) { library = preferNative(value); }
-                });
-            })();
-            """
-            configuration.userContentController.addUserScript(WKUserScript(
-                source: nativeHLS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
-        }
-        let view = WKWebView(frame: .zero, configuration: configuration)
-        view.isOpaque = false
-        view.backgroundColor = .black
-        view.scrollView.backgroundColor = .black
-        view.navigationDelegate = context.coordinator
-        view.uiDelegate = context.coordinator
-        view.allowsBackForwardNavigationGestures = true
-        state.webView = view
-        // Embed the published server alone, using its original watch page as the base.
-        let escaped = url.absoluteString.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "<", with: "&lt;")
-        view.scrollView.isScrollEnabled = false
-        view.loadHTMLString("""
-        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-        <style>html,body{margin:0;width:100%;height:100%;background:#000}iframe{width:100%;height:100%;border:0}</style>
-        </head><body><iframe src="\(escaped)" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></body></html>
-        """, baseURL: referrer)
-        return view
-    }
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
-        uiView.stopLoading()
-        uiView.loadHTMLString("", baseURL: nil)
-        uiView.navigationDelegate = nil
-        uiView.uiDelegate = nil
-    }
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        let url: URL
-        let state: PlayerState
-        init(url: URL, state: PlayerState) { self.url = url; self.state = state }
-        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-            state.loading = true
-            state.error = nil
-        }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            state.loading = false
-        }
-
-        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-            if let response = navigationResponse.response as? HTTPURLResponse, response.statusCode >= 400 {
-                state.loading = false
-                state.error = "سيرفر البث رفض التشغيل (\(response.statusCode)). يحتاج صاحب الموقع السماح للمشغّل بالعمل داخل التطبيق."
-                decisionHandler(.cancel)
-            } else { decisionHandler(.allow) }
-        }
-
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if navigationAction.navigationType == .linkActivated,
-               navigationAction.request.url?.host != url.host {
-                decisionHandler(.cancel)
-            } else { decisionHandler(.allow) }
-        }
-
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
-        private func failed(_ error: Error) {
-            if (error as NSError).code == NSURLErrorCancelled { return }
-            state.loading = false
-            state.error = "تعذّر فتح مشغّل الموقع. جرّب تحديثه أو أعد المحاولة عندما يكون البث متاحًا."
-        }
-        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-            state.loading = false
-            state.error = "توقف المشغّل. اضغط إعادة المحاولة."
-        }
-        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-            return nil
-        }
-    }
-}
