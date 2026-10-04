@@ -72,7 +72,7 @@ final class UnifiedPlayerModel: ObservableObject {
             guard let url = server.playbackURL else { throw APIError.server("رابط البث غير متاح.") }
             let media: URL
             if server.type == "ntv_page" {
-                let resolved = try await NTVProvider.source(page: url)
+                let resolved = try await NTVProvider.source(page: url, includeAlternatives: false)
                 try Task.checkCancellation()
                 guard generation == run else { return }
                 guard let frame = resolved.servers.first?.playbackURL else { throw APIError.server("هذا البث غير متاح الآن.") }

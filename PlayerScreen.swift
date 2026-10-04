@@ -43,6 +43,8 @@ struct PlayerScreen: View {
     @State private var handledFailure: String?
     @State private var panel: PlayerPanel?
     @State private var previousIdleTimer = false
+    @State private var controlsVisible = true
+    @State private var controlsActivity = UUID()
     private var colors: ThemeColors { ThemeColors(theme: theme, dark: scheme == .dark) }
     private var selected: StreamServer? {
         playback.servers.first { $0.id == selectedID } ?? playback.servers.first { $0.is_default == true } ?? playback.servers.first
@@ -86,8 +88,16 @@ struct PlayerScreen: View {
         .task(id: loadingKey) { await load() }
         .onChange(of: model.error) { _ in handleFailure() }
         .onChange(of: web.error) { _ in handleFailure() }
-        .onChange(of: model.isPlaying) { if $0 { notice = nil } }
-        .onChange(of: web.started) { if $0 { notice = nil } }
+        .onChange(of: model.isPlaying) { if $0 { notice = nil; revealControls() } }
+        .onChange(of: web.started) { if $0 { notice = nil; revealControls() } }
+        .task(id: controlsActivity) {
+            do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
+            guard !Task.isCancelled, failure == nil, !model.loading, panel == nil,
+                  model.isPlaying || web.started else { return }
+            withAnimation(.easeOut(duration: 0.2)) { controlsVisible = false }
+        }
+        .onChange(of: panel) { _ in revealControls() }
+        .onChange(of: expanded) { _ in revealControls() }
         .sheet(item: $panel) { choice in
             PlayerOptions(panel: choice, servers: playback.servers, selectedID: selected?.id,
                 failed: attempts.failed, qualities: qualities, qualityID: qualityID,
@@ -133,42 +143,57 @@ struct PlayerScreen: View {
             }
         }
         .clipped()
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture().onEnded { revealControls() })
         .overlay(alignment: .topTrailing) {
-            HStack(spacing: 12) {
-                if cinema {
-                    Button { dismiss() } label: { Image(systemName: "xmark") }.accessibilityLabel("إغلاق المشاهدة")
-                    Spacer()
-                }
-                Button { if cinema { expanded = false; windowedLandscape = true } else { expanded = true; windowedLandscape = false } } label: {
-                    Label(cinema ? "تصغير" : "ملء الشاشة", systemImage: cinema ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                }.accessibilityIdentifier("player-fullscreen")
-            }.font(.caption.bold()).padding(12).foregroundStyle(.white)
-                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal, cinema ? 44 : 10).padding(.top, 10)
+            if controlsVisible || failure != nil {
+                HStack {
+                    if cinema {
+                        Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.45), in: Circle()) }
+                            .accessibilityLabel("إغلاق المشاهدة")
+                        Spacer()
+                    }
+                    Button {
+                        if cinema { expanded = false; windowedLandscape = true }
+                        else { expanded = true; windowedLandscape = false }
+                        revealControls()
+                    } label: {
+                        Image(systemName: cinema ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .padding(12).background(.black.opacity(0.45), in: Circle())
+                    }.accessibilityLabel(cinema ? "تصغير" : "ملء الشاشة").accessibilityIdentifier("player-fullscreen")
+                }.font(.subheadline.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, cinema ? 32 : 10).padding(.top, 10)
+            }
         }
         .overlay(alignment: .bottom) {
-            if model.embedded == nil || cinema {
-            HStack(spacing: 24) {
-                if model.embedded == nil && model.player != nil {
-                    Button(action: model.togglePlayback) { Image(systemName: model.isPlaying ? "pause.fill" : "play.fill") }
-                        .accessibilityLabel(model.isPlaying ? "إيقاف مؤقت" : "تشغيل")
-                    Button(action: model.toggleMute) { Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") }
-                        .accessibilityLabel(model.isMuted ? "تشغيل الصوت" : "كتم الصوت")
-                }
-                if cinema {
-                    Spacer()
-                    Button { panel = .sources } label: { Label("البث \(sourceNumber)", systemImage: "play.rectangle") }
-                    Button { panel = .quality } label: { Label(qualityLabel, systemImage: "slider.horizontal.3") }
-                }
-            }.font(.subheadline.bold()).foregroundStyle(.white).padding(14)
-                .background(.black.opacity(0.65), in: Capsule())
-                .padding(.horizontal, cinema ? 44 : 12).padding(.bottom, model.embedded != nil ? 46 : 12)
+            if controlsVisible && (model.embedded == nil || cinema) {
+                HStack(spacing: 12) {
+                    if model.embedded == nil && model.player != nil {
+                        Button { model.togglePlayback(); revealControls() } label: {
+                            Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").padding(12).background(.black.opacity(0.45), in: Circle())
+                        }.accessibilityLabel(model.isPlaying ? "إيقاف مؤقت" : "تشغيل")
+                        Button { model.toggleMute(); revealControls() } label: {
+                            Image(systemName: model.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill").padding(12).background(.black.opacity(0.45), in: Circle())
+                        }.accessibilityLabel(model.isMuted ? "تشغيل الصوت" : "كتم الصوت")
+                    }
+                    if cinema {
+                        Spacer()
+                        Button { panel = .sources } label: { Label("البث \(sourceNumber)", systemImage: "play.rectangle").padding(10).background(.black.opacity(0.45), in: Capsule()) }
+                        Button { panel = .quality } label: { Label(qualityLabel, systemImage: "slider.horizontal.3").padding(10).background(.black.opacity(0.45), in: Capsule()) }
+                    }
+                }.font(.subheadline.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, cinema ? 32 : 12).padding(.bottom, model.embedded != nil ? 46 : 12)
             }
         }
     }
 
+    private func revealControls() {
+        controlsVisible = true
+        controlsActivity = UUID()
+    }
+
     @MainActor private func load() async {
-        web.reset(); handledFailure = nil
+        web.reset(); handledFailure = nil; revealControls()
         guard let selected else { return }
         await model.load(server: selected, watch: playback.url)
         guard !Task.isCancelled, model.embedded != nil else { return }

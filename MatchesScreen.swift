@@ -13,6 +13,7 @@ struct MatchesScreen: View {
     @State private var showingSearch = false
     @State private var liveOnly = false
     @State private var provider = "all"
+    @State private var ntvServer = "kobra"
     @State private var search = ""
     @State private var playback: Playback?
     @State private var checkingMatch: String?
@@ -47,6 +48,19 @@ struct MatchesScreen: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("dayPicker")
+                    if provider != "majed" {
+                        Menu {
+                            ForEach(NTVProvider.sections, id: \.self) { section in
+                                Button { ntvServer = section; selectedLeague = LeagueFilter.all; model.matches = []; model.updated = nil } label: {
+                                    if section == ntvServer { Label(section.uppercased(), systemImage: "checkmark") }
+                                    else { Text(section.uppercased()) }
+                                }
+                            }
+                        } label: {
+                            HStack { Label("مباريات NTV · " + ntvServer.uppercased(), systemImage: "play.tv"); Spacer(); Image(systemName: "chevron.down") }
+                                .font(.subheadline.bold()).padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                    }
                     if showingSearch { SearchField(text: $search, prompt: "ابحث عن فريق أو بطولة") }
                     HStack(spacing: 12) {
                         Button { liveOnly.toggle() } label: {
@@ -70,7 +84,7 @@ struct MatchesScreen: View {
                     if let error = model.error {
                         VStack(spacing: 12) {
                             Label(error, systemImage: "wifi.exclamationmark")
-                            Button("إعادة المحاولة") { Task { await model.refresh(offset: day) } }
+                            Button("إعادة المحاولة") { Task { await model.refresh(offset: day, ntvServer: ntvServer) } }
                         }.font(.subheadline).padding().frame(maxWidth: .infinity)
                             .background(colors.card, in: RoundedRectangle(cornerRadius: 20))
                     }
@@ -117,14 +131,14 @@ struct MatchesScreen: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            .refreshable { await model.refresh(offset: day) }
-            .task(id: "\(day)-\(scenePhase == .active)-\(playback == nil)") {
+            .refreshable { await model.refresh(offset: day, ntvServer: ntvServer) }
+            .task(id: "\(day)-\(ntvServer)-\(scenePhase == .active)-\(playback == nil)") {
                 guard scenePhase == .active, playback == nil else { return }
                 Task { await updates.check() }
-                await model.refresh(offset: day)
+                await model.refresh(offset: day, ntvServer: ntvServer)
                 while !Task.isCancelled {
                     do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { return }
-                    await model.refresh(offset: day)
+                    await model.refresh(offset: day, ntvServer: ntvServer)
                     Task { await updates.check() }
                 }
             }
@@ -226,11 +240,11 @@ struct MatchesScreen: View {
         do {
             // Recheck availability on every tap; a previously published link can expire.
             let fresh: [Match]
-            if match.providerID == "ntv" { fresh = try await NTVProvider.matches(date: match.date) }
+            if match.providerID == "ntv" { fresh = try await NTVProvider.matches(date: match.date, server: ntvServer) }
             else { fresh = try await MatchesAPI().load(date: match.date) }
             guard let current = fresh.first(where: { $0.id == match.id }) else {
                 message = "هذه المباراة لم تعد موجودة في الجدول الحالي."
-                await model.refresh(offset: day)
+                await model.refresh(offset: day, ntvServer: ntvServer)
                 return
             }
             let sources = try await BroadcastCatalog.sources(for: current)

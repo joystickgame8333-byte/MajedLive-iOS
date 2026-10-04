@@ -66,7 +66,7 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(result.count, 1)
         let match = try XCTUnwrap(result.first)
         XCTAssertEqual(match.providerID, "ntv")
-        XCTAssertEqual(match.id, "ntv:one")
+        XCTAssertEqual(match.id, "ntv:kobra:one")
         XCTAssertTrue(match.isLive)
         XCTAssertEqual(match.time, "00:30")
         XCTAssertFalse(match.hasScore)
@@ -88,6 +88,39 @@ final class MajedLiveTests: XCTestCase {
         let channel = NTVProvider.embedServers(html: "<iframe id='streamPlayer' src='https://example.com/published'></iframe>", page: page)
         XCTAssertEqual(channel.first?.playbackURL?.host, "example.com")
         XCTAssertTrue(NTVProvider.embedServers(html: "<iframe src='https://ads.example'></iframe>", page: page).isEmpty)
+    }
+
+    func testNTVSourceMenuPreservesSourceIndexAndRejectsForeignNavigation() throws {
+        let page = try XCTUnwrap(URL(string: "https://ntv.cx/watch/titan/match"))
+        let html = """
+        <select id="sourceSelect">
+        <option value="/watch/titan/match?source=0">Sport One</option>
+        <option value="/watch/titan/match?source=7">Sport Two</option>
+        <option value="https://advert.example/watch/titan/match">Ad</option>
+        </select>
+        """
+        let choices = NTVProvider.sourceChoices(html: html, page: page)
+        XCTAssertEqual(choices.map(\.name), ["Sport One", "Sport Two"])
+        XCTAssertEqual(choices.last?.playbackURL?.query, "source=7")
+        XCTAssertTrue(choices.allSatisfy { $0.type == "ntv_page" })
+    }
+
+    func testNTVNonKobraFootballParsesTeamsWithoutInventingScores() throws {
+        let data = Data(#"{"id":"match","title":"League : Home vs. Away","category":"Soccer","tournament":"League","date":1791136800000,"sources":[{"source":"sport","id":"one"}]}"#.utf8)
+        let event = try JSONDecoder().decode(NTVProvider.Event.self, from: data)
+        let match = try XCTUnwrap(event.match(server: "titan"))
+        XCTAssertEqual(match.home_team.name, "Home")
+        XCTAssertEqual(match.away_team.name, "Away")
+        XCTAssertEqual(match.playbackURL?.path, "/watch/titan/match")
+        XCTAssertFalse(match.hasScore)
+    }
+
+    func testAdDomainBoundariesDoNotBlockPlayerOrSimilarHostnames() throws {
+        XCTAssertTrue(PlayerAdProtection.isBlocked(URL(string: "https://cdn.chatmate.tv/ad")))
+        XCTAssertFalse(PlayerAdProtection.isBlocked(URL(string: "https://notchatmate.tv/player")))
+        XCTAssertFalse(PlayerAdProtection.isBlocked(URL(string: "https://ntv.cx/embed?t=signed")))
+        let rules = try JSONSerialization.jsonObject(with: Data(PlayerAdProtection.rules.utf8)) as? [[String: Any]]
+        XCTAssertEqual(rules?.count, PlayerAdProtection.domains.count + 1)
     }
 
     func testQualitySelectionPreservesAudioAndSignedVariantURLs() {

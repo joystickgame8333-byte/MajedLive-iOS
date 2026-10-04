@@ -293,14 +293,14 @@ final class ScheduleModel: ObservableObject {
     @Published var displayedDate = ""
     private var requestID = UUID()
 
-    func refresh(offset: Int, clear: Bool = false) async {
+    func refresh(offset: Int, clear: Bool = false, ntvServer: String = "kobra") async {
         let date = Site.date(offset: offset)
         let id = UUID()
         requestID = id
         if clear || date != displayedDate { matches = []; updated = nil }
         loading = true
         error = nil
-        let result = await FootballSchedule.load(date: date)
+        let result = await FootballSchedule.load(date: date, ntvServer: ntvServer)
         guard !Task.isCancelled, requestID == id else { return }
         if result.unavailable.count < 2 {
             matches = result.matches

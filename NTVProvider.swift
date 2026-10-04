@@ -2,6 +2,7 @@ import Foundation
 
 enum NTVProvider {
     static let origin = URL(string: "https://ntv.cx")!
+    static let sections = ["kobra", "falcon", "raptor", "phoenix", "titan"]
     struct Catalog: Decodable {
         let success: Bool
         let all: [Event]?
@@ -16,17 +17,23 @@ enum NTVProvider {
         struct Source: Decodable { let source: String; let id: String }
         let id: String
         let title: String
+        let tournament: String?
         let category: String?
         let date: Double?
         let live: Bool?
         let teams: Teams?
         let sources: [Source]?
 
-        func match() throws -> Match? {
-            // Exact category matching excludes American football and non-match 24/7 entries.
-            guard category?.lowercased() == "football", let date, date > 0,
-                  let home = MatchInformation.text(teams?.home?.name),
-                  let away = MatchInformation.text(teams?.away?.name) else { return nil }
+        func match(server: String = "kobra", liveOverride: Bool = false) throws -> Match? {
+            let sport = category?.lowercased() ?? ""
+            guard sport == "football" || sport == "soccer" || sport.contains("soccer ⚽") || sport == "all soccer events ⚽" || sport == "world - friendly ⚽",
+                  let date, date > 0 else { return nil }
+            let cleanTitle = title.components(separatedBy: " : ").last ?? title
+            let sides = cleanTitle.replacingOccurrences(of: #"\s+(?:vs\.?|v\.)\s+"#, with: "|||", options: [.regularExpression, .caseInsensitive]).components(separatedBy: "|||")
+            guard let home = MatchInformation.text(teams?.home?.name ?? sides.first),
+                  let away = MatchInformation.text(teams?.away?.name ?? (sides.count == 2 ? sides[1] : nil)) else { return nil }
+            let liveNow = live == true || liveOverride
+            let league = MatchInformation.text(tournament) ?? "كرة القدم"
             let start = Date(timeIntervalSince1970: date / 1000)
             let formatter = DateFormatter()
             formatter.calendar = Calendar(identifier: .gregorian)
@@ -37,34 +44,35 @@ enum NTVProvider {
             formatter.dateFormat = "HH:mm"
             let ready = !(sources ?? []).isEmpty
             let payload: [String: Any] = [
-                "id": "ntv:" + id, "provider": "ntv", "date": day, "time": formatter.string(from: start),
-                "state": live == true ? "live" : "upcoming", "state_text": live == true ? "مباشر" : "حسب جدول المصدر",
+                "id": "ntv:" + server + ":" + id, "provider": "ntv", "date": day, "time": formatter.string(from: start),
+                "state": liveNow ? "live" : "upcoming", "state_text": liveNow ? "مباشر" : "حسب جدول المصدر",
                 "home_team": ["name": home], "away_team": ["name": away],
-                "tournament": ["id": "ntv-football", "name": "كرة القدم · NTV"],
+                "tournament": ["id": "ntv-" + server + "-" + league, "name": league + " · " + server.uppercased()],
                 "watch_ready": ready, "watch_available": ready, "site_watch_enabled": true,
-                "watch_url": NTVProvider.origin.appendingPathComponent("watch/kobra").appendingPathComponent(id).absoluteString
+                "watch_url": NTVProvider.origin.appendingPathComponent("watch/" + server).appendingPathComponent(id).absoluteString
             ]
             return try JSONDecoder().decode(Match.self, from: JSONSerialization.data(withJSONObject: payload))
         }
     }
 
-    static func football(_ catalog: Catalog, date: String) throws -> [Match] {
+    static func football(_ catalog: Catalog, date: String, server: String = "kobra") throws -> [Match] {
         var seen = Set<String>()
         // Live entries take precedence over duplicates in the all-events collection.
         return try ((catalog.live ?? []) + (catalog.all ?? [])).compactMap { event in
-            guard seen.insert(event.id).inserted, let match = try event.match(), match.date == date else { return nil }
+            guard seen.insert(event.id).inserted, let match = try event.match(server: server, liveOverride: (catalog.live ?? []).contains { $0.id == event.id }), match.date == date else { return nil }
             return match
         }.sorted { $0.time < $1.time }
     }
 
-    static func matches(date: String) async throws -> [Match] {
+    static func matches(date: String, server: String = "kobra") async throws -> [Match] {
+        guard sections.contains(server) else { throw APIError.server("قسم NTV غير صالح.") }
         let url = NTVProvider.origin.appendingPathComponent("api/get-matches")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "server", value: "kobra"), URLQueryItem(name: "type", value: "both")]
+        components.queryItems = [URLQueryItem(name: "server", value: server), URLQueryItem(name: "type", value: "both")]
         let (data, _) = try await PublishedStream.request(components.url!, headers: ["Accept": "application/json"])
         let catalog = try JSONDecoder().decode(Catalog.self, from: data)
         guard catalog.success else { throw APIError.server("تعذّر تحديث جدول NTV.") }
-        return try football(catalog, date: date)
+        return try football(catalog, date: date, server: server)
     }
 
     static func unescape(_ value: String) -> String {
@@ -99,14 +107,29 @@ enum NTVProvider {
                 type: "iframe", url: url.absoluteString, enabled: true, is_default: index == 0, priority: index)
         }
     }
-    static func source(page: URL) async throws -> BroadcastSource {
+    static func sourceChoices(html: String, page: URL) -> [StreamServer] {
+        let select = captured(#"<select\b[^>]*id=["']sourceSelect["'][^>]*>(.*?)</select>"#, in: html).first?.first ?? ""
+        let options = captured(#"<option\b[^>]*value=["']([^"']+)["'][^>]*>(.*?)</option>"#, in: select)
+        var seen = Set<URL>()
+        return options.enumerated().compactMap { index, values in
+            guard let url = URL(string: unescape(values[0]), relativeTo: page)?.absoluteURL,
+                  url.scheme == "https", url.host == origin.host, url.path == page.path,
+                  url.user == nil, url.password == nil, seen.insert(url).inserted else { return nil }
+            let label = unescape(values[1]).replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return StreamServer(id: "ntv-source-\(index)", name: label.isEmpty ? "بث \(index + 1)" : label,
+                type: "ntv_page", url: url.absoluteString, enabled: true, is_default: index == 0, priority: index)
+        }
+    }
+    static func source(page: URL, includeAlternatives: Bool = true) async throws -> BroadcastSource {
         guard page.scheme == "https", page.host == origin.host,
               page.path.hasPrefix("/watch/") || page.path.hasPrefix("/channel/") else {
             throw APIError.server("رابط NTV غير صالح.")
         }
         let (data, _) = try await PublishedStream.request(page, headers: ["Referer": origin.absoluteString])
         guard let html = String(data: data, encoding: .utf8) else { throw APIError.server("تعذّر قراءة مصدر NTV.") }
-        let servers = embedServers(html: html, page: page)
+        let alternatives = includeAlternatives ? sourceChoices(html: html, page: page) : []
+        let servers = alternatives.count > 1 ? alternatives : embedServers(html: html, page: page)
         guard !servers.isEmpty else { throw APIError.server("لم ينشر NTV مشغّلًا لهذه المباراة أو القناة حاليًا.") }
         return BroadcastSource(id: "ntv", name: "NTV", watchURL: page, servers: servers)
     }
@@ -191,10 +214,10 @@ enum NTVProvider {
 
 enum FootballSchedule {
     struct Result { let matches: [Match]; let unavailable: [String] }
-    static func load(date: String) async -> Result {
+    static func load(date: String, ntvServer: String = "kobra") async -> Result {
         await withTaskGroup(of: (String, [Match]?).self) { group in
             group.addTask { ("ماجد", try? await MatchesAPI().load(date: date)) }
-            group.addTask { ("NTV", try? await NTVProvider.matches(date: date)) }
+            group.addTask { ("NTV", try? await NTVProvider.matches(date: date, server: ntvServer)) }
             var matches: [Match] = []; var unavailable: [String] = []
             for await (provider, data) in group {
                 if let data { matches += data } else { unavailable.append(provider) }

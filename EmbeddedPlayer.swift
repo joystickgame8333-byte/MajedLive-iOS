@@ -73,6 +73,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         })();
         """
         configuration.userContentController.addUserScript(WKUserScript(source: qualityBridge, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
+        configuration.userContentController.addUserScript(WKUserScript(source: PlayerAdProtection.script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.isOpaque = false; view.backgroundColor = .black; view.scrollView.backgroundColor = .black
         view.scrollView.isScrollEnabled = false
@@ -83,7 +84,16 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         var request = URLRequest(url: url)
         request.setValue(referrer.absoluteString, forHTTPHeaderField: "Referer")
         request.timeoutInterval = 25
-        view.load(request)
+        // Install rules before the first request, including every nested frame.
+        let coordinator = context.coordinator
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "football-player-ads-v1", encodedContentRuleList: PlayerAdProtection.rules) { [weak view, weak coordinator] rules, _ in
+            DispatchQueue.main.async {
+                guard let view, let coordinator, coordinator.active else { return }
+                guard let rules else { state.error = "تعذّر تجهيز حجب الإعلانات. أعد المحاولة."; return }
+                view.configuration.userContentController.add(rules)
+                view.load(request)
+            }
+        }
         return view
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -117,6 +127,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
             if let selected = payload["selected"] as? Int, selected != state.selectedQuality { state.selectedQuality = selected }
         }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if PlayerAdProtection.isBlocked(action.request.url) { decisionHandler(.cancel); return }
             if action.targetFrame == nil || (action.targetFrame?.isMainFrame == true && action.navigationType == .linkActivated) {
                 decisionHandler(.cancel); return
             }
@@ -135,4 +146,54 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
     }
+}
+
+// Target advertising only: media CDNs, player libraries and signed stream URLs remain usable.
+enum PlayerAdProtection {
+    static let domains = ["chatmate.tv", "chaturbate.com", "stripchat.com", "exoclick.com", "exosrv.com", "exdynsrv.com", "trafficjunky.net", "juicyads.com", "popads.net", "popcash.net", "adsterra.com", "doubleclick.net", "googlesyndication.com", "adsco.re"]
+    static func isBlocked(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return domains.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+    static let selectors = "[id='ad-overlay'],[id='adOverlay'],[id='ad-container'],[id='adContainer'],[id='ads-container'],[id='video-ad'],[id='videoAd'],.ad-overlay,.ads-overlay,.ad-container,.ads-container,.video-ad,.video-ads,.vast-overlay,.vast-container,.popunder,.pop-up-ad,iframe[src*='chatmate.tv'],iframe[src*='stripchat.com'],a[href*='chatmate.tv'],a[href*='chaturbate.com']"
+    static var rules: String {
+        let network: [[String: Any]] = domains.map { domain in
+            ["trigger": ["url-filter": "^https?://([^/]+\\.)?" + NSRegularExpression.escapedPattern(for: domain) + "[:/]"], "action": ["type": "block"]]
+        }
+        let cosmetic: [String: Any] = ["trigger": ["url-filter": ".*"], "action": ["type": "css-display-none", "selector": selectors]]
+        let data = try! JSONSerialization.data(withJSONObject: network + [cosmetic])
+        return String(decoding: data, as: UTF8.self)
+    }
+    static let script = #"""
+    (() => {
+      window.open = () => null;
+      const selectors = "[id='ad-overlay'],[id='adOverlay'],[id='ad-container'],[id='adContainer'],[id='ads-container'],[id='video-ad'],[id='videoAd'],.ad-overlay,.ads-overlay,.ad-container,.ads-container,.video-ad,.video-ads,.vast-overlay,.vast-container,.popunder,.pop-up-ad,iframe[src*='chatmate.tv'],iframe[src*='stripchat.com'],a[href*='chatmate.tv'],a[href*='chaturbate.com']";
+      const hide = el => {
+        if (el.dataset.footballAdHidden) return;
+        el.dataset.footballAdHidden = '1';
+        el.querySelectorAll('video,audio').forEach(v => { v.pause(); v.muted = true; });
+        el.style.setProperty('display','none','important');
+        el.style.setProperty('pointer-events','none','important');
+      };
+      let queued = false;
+      const clean = () => {
+        queued = false;
+        document.querySelectorAll(selectors).forEach(hide);
+        // Providers often randomize IDs. Identify the ad's own close control,
+        // then hide only its positioned overlay, never the surrounding player.
+        document.querySelectorAll('button,span,a,div').forEach(button => {
+          if (button.children.length || !/^(close ad|close advertisement|إغلاق الإعلان)\s*[×x✕]?$/i.test((button.textContent || '').trim())) return;
+          let el = button.parentElement;
+          for (let depth = 0; el && el !== document.body && depth < 5; depth++, el = el.parentElement) {
+            const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+            if ((style.position === 'fixed' || style.position === 'absolute') && rect.width > 150 && rect.height > 100 && rect.width * rect.height < innerWidth * innerHeight * 0.95) { hide(el); break; }
+          }
+        });
+      };
+      const observer = new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(clean); } });
+      observer.observe(document, {childList:true,subtree:true});
+      addEventListener('DOMContentLoaded', clean, {once:true});
+      addEventListener('pagehide', () => observer.disconnect(), {once:true});
+    })();
+    """#
 }
