@@ -49,6 +49,7 @@ struct LiveChannel: Identifiable {
     let id: String
     let name: String
     let source: BroadcastSource
+    var region = "arabic"
     var playback: Playback? {
         guard let server = source.servers.first(where: { $0.playbackURL != nil }) else { return nil }
         return source.playback(title: name, server: server)

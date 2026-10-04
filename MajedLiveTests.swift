@@ -1,7 +1,53 @@
 import XCTest
+import CoreGraphics
 @testable import MajedLive
 
 final class MajedLiveTests: XCTestCase {
+    func testFallbackTriesOnlyUnfailedAvailableSourcesAndStopsAfterTwoSwitches() {
+        func server(_ id: String, enabled: Bool = true) -> StreamServer {
+            StreamServer(id: id, name: id, type: "iframe", url: "https://example.com/\(id)", enabled: enabled, is_default: false, priority: 0)
+        }
+        let sources = [server("one"), server("disabled", enabled: false), server("two"), server("three"), server("four")]
+        var attempts = PlaybackAttempts()
+        XCTAssertEqual(attempts.next(after: "one", servers: sources)?.id, "two")
+        XCTAssertEqual(attempts.next(after: "two", servers: sources)?.id, "three")
+        XCTAssertNil(attempts.next(after: "three", servers: sources))
+        XCTAssertEqual(attempts.failed, Set(["one", "two", "three"]))
+        var single = PlaybackAttempts()
+        XCTAssertNil(single.next(after: "one", servers: [sources[0]]))
+    }
+
+    func testFullscreenUsesLandscapeCanvasAndNormalViewKeepsVideoProportions() {
+        let portrait = CGSize(width: 390, height: 844)
+        let normal = PlayerLayout(size: portrait, expanded: false)
+        XCTAssertFalse(normal.cinema)
+        XCTAssertEqual(normal.videoHeight, 219.375, accuracy: 0.01)
+        let full = PlayerLayout(size: portrait, expanded: true)
+        XCTAssertTrue(full.rotated)
+        XCTAssertTrue(full.cinema)
+        XCTAssertEqual(full.width, 844)
+        XCTAssertEqual(full.videoHeight, 390)
+        let landscape = PlayerLayout(size: CGSize(width: 844, height: 390), expanded: false)
+        XCTAssertTrue(landscape.cinema)
+        XCTAssertFalse(landscape.rotated)
+        XCTAssertFalse(PlayerLayout(size: CGSize(width: 844, height: 390), expanded: false, windowedLandscape: true).cinema)
+    }
+
+    func testNTVGroupsSameChannelRegionWithoutCombiningDifferentCountries() {
+        let channels = [
+            NTVProvider.Channel(channel_id: "a", channel_name: "beIN Sports 4 Arabic", channel_code: "", server: "dlhd"),
+            NTVProvider.Channel(channel_id: "b", channel_name: "beIN SPORTS 4", channel_code: "sa", server: "cdnlive"),
+            NTVProvider.Channel(channel_id: "c", channel_name: "beIN SPORTS 4", channel_code: "tr", server: "cdnlive"),
+            NTVProvider.Channel(channel_id: "d", channel_name: "beIN SPORTS 4 FRANCE", channel_code: "", server: "hesgoales")
+        ]
+        let result = NTVProvider.groupedChannels(channels + [channels[0]])
+        XCTAssertEqual(result.count, 3)
+        XCTAssertEqual(result.first { $0.region == "arabic" }?.source.servers.count, 2)
+        XCTAssertEqual(Set(result.map(\.region)), Set(["arabic", "tr", "fr"]))
+        XCTAssertTrue(result.flatMap { $0.source.servers }.allSatisfy { $0.type == "ntv_page" && $0.playbackURL != nil })
+        XCTAssertEqual(Set(result.map(\.id)).count, 3)
+    }
+
     func testNTVFootballCategoryDayBoundaryAndLivePrecedence() throws {
         let start = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-10-04T21:30:00Z"))
         func event(_ id: String, category: String = "football", live: Bool = false, date: Double? = nil) -> [String: Any] {

@@ -30,6 +30,7 @@ struct ChannelsScreen: View {
     @Environment(\.colorScheme) private var scheme
     @State private var ntvChannels: [LiveChannel] = []
     @State private var provider = "all"
+    @State private var allRegions = false
     @State private var search = ""
     @State private var loading = false
     @State private var loadError: String?
@@ -40,7 +41,7 @@ struct ChannelsScreen: View {
     private var channels: [LiveChannel] {
         (ChannelCatalog.channels + ntvChannels).filter { channel in
             let source = channel.id.hasPrefix("ntv:") ? "ntv" : "fajr"
-            return (provider == "all" || source == provider) &&
+            return (provider == "all" || source == provider) && (allRegions || channel.region == "arabic") &&
                 (search.isEmpty || channel.name.localizedCaseInsensitiveContains(search))
         }
     }
@@ -50,12 +51,13 @@ struct ChannelsScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("قنواتك الرياضية").font(.title2.bold())
-                        Text("الفجر وقنوات beIN المتاحة عبر NTV")
+                        Text("القنوات المباشرة").font(.title2.bold())
+                        Text("اختر قناة، ثم شاهد مباشرة")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     SearchField(text: $search, prompt: "ابحث عن قناة")
                     ProviderPicker(selection: $provider, options: [("all", "الكل"), ("fajr", "الفجر"), ("ntv", "NTV")])
+                    Toggle("إظهار القنوات الدولية أيضًا", isOn: $allRegions).font(.caption).tint(colors.accent)
                     if let loadError {
                         HStack {
                             Text(loadError).font(.caption)
@@ -105,8 +107,8 @@ struct ChannelsScreen: View {
                     else { Image(systemName: "play.circle.fill").foregroundStyle(colors.accent) }
                 }
                 Text(channel.name).font(.subheadline.bold()).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                Text(channel.source.name).font(.caption).foregroundStyle(.secondary)
-            }.padding(16).frame(maxWidth: .infinity, minHeight: 135, alignment: .topLeading)
+                Text(channel.source.servers.count > 1 ? "\(channel.source.servers.count) مصادر · " + channel.source.name : channel.source.name).font(.caption).foregroundStyle(.secondary)
+            }.padding(16).frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
                 .background(colors.card, in: RoundedRectangle(cornerRadius: 20))
         }.buttonStyle(.plain).disabled(opening != nil)
     }
@@ -128,9 +130,7 @@ struct ChannelsScreen: View {
         opening = channel.id
         defer { opening = nil }
         do {
-            let source: BroadcastSource
-            if channel.id.hasPrefix("ntv:") { source = try await NTVProvider.source(page: channel.source.watchURL) }
-            else { source = channel.source }
+            let source = channel.source
             guard let server = source.servers.first else { throw APIError.server("هذه القناة غير متاحة حاليًا.") }
             playback = source.playback(title: channel.name, server: server)
         } catch {

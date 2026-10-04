@@ -137,10 +137,43 @@ enum NTVProvider {
             }
         }
     }
+    // Combine only a matching channel name AND region; different countries stay separate.
+    static func groupedChannels(_ channels: [Channel]) -> [LiveChannel] {
+        var groups: [String: [Channel]] = [:]
+        var names: [String: String] = [:]
+        var regions: [String: String] = [:]
+        for channel in channels where channel.channel_name.lowercased().contains("bein") {
+            guard channel.watchURL != nil else { continue }
+            var name = channel.channel_name.lowercased().replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            var region = channel.channel_code?.lowercased() ?? ""
+            let countries = [("arabic", "arabic"), ("france", "fr"), ("usa", "us"), ("turkey", "tr")]
+            for (suffix, code) in countries where name.hasSuffix(" " + suffix) {
+                name = String(name.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces)
+                if region.isEmpty { region = code }
+            }
+            if ["sa", "ar", "ae"].contains(region) { region = "arabic" }
+            if region.isEmpty { region = "other" }
+            let key = name + ":" + region
+            groups[key, default: []].append(channel)
+            names[key] = name.replacingOccurrences(of: "bein", with: "beIN").replacingOccurrences(of: "sports", with: "SPORTS")
+            regions[key] = region
+        }
+        return groups.keys.sorted().compactMap { key in
+            guard let entries = groups[key], let first = entries.first, let watch = first.watchURL else { return nil }
+            var seen = Set<URL>()
+            let servers = entries.compactMap { entry -> StreamServer? in
+                guard let page = entry.watchURL, seen.insert(page).inserted else { return nil }
+                return StreamServer(id: "ntv:" + entry.server + ":" + entry.channel_id, name: "بث \(seen.count)",
+                    type: "ntv_page", url: page.absoluteString, enabled: true, is_default: seen.count == 1, priority: seen.count)
+            }
+            let region = regions[key] ?? "other"
+            let suffix = region == "arabic" ? "عربي" : region == "other" ? "دولي" : region.uppercased()
+            return LiveChannel(id: "ntv:" + key, name: (names[key] ?? first.channel_name) + " · " + suffix,
+                source: BroadcastSource(id: "ntv", name: "NTV", watchURL: watch, servers: servers), region: region)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
     static func channels() async throws -> [LiveChannel] {
-        var result: [LiveChannel] = []
-        var seen = Set<String>()
-        // NTV includes entertainment channels; import the published beIN sports collection only.
+        var channels: [Channel] = []
         for offset in stride(from: 0, to: 250, by: 50) {
             try Task.checkCancellation()
             var url = URLComponents(url: NTVProvider.origin.appendingPathComponent("api/get-channels"), resolvingAgainstBaseURL: false)!
@@ -148,19 +181,12 @@ enum NTVProvider {
             let (data, _) = try await PublishedStream.request(url.url!)
             let page = try JSONDecoder().decode(ChannelPage.self, from: data)
             guard page.success else { throw APIError.server("تعذّر تحديث قنوات NTV.") }
-            for channel in page.channels where channel.channel_name.lowercased().contains("bein") {
-                guard let watch = channel.watchURL, seen.insert(watch.absoluteString).inserted else { continue }
-                let id = "ntv:" + channel.server + ":" + channel.channel_id + ":" + (channel.channel_code ?? "")
-                let server = StreamServer(id: id, name: "NTV · " + channel.server, type: "ntv_page", url: watch.absoluteString,
-                    enabled: true, is_default: true, priority: 0)
-                let code = MatchInformation.text(channel.channel_code).map { " · " + $0.uppercased() } ?? ""
-                result.append(LiveChannel(id: id, name: channel.channel_name + code,
-                    source: BroadcastSource(id: "ntv", name: "NTV", watchURL: watch, servers: [server])))
-            }
+            channels += page.channels
             if page.has_more != true || page.channels.isEmpty { break }
         }
-        return result.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return groupedChannels(channels)
     }
+
 }
 
 enum FootballSchedule {

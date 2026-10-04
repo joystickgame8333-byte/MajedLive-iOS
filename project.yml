@@ -21,8 +21,11 @@ targets:
       - path: UpdateNotifications.swift
       - path: NTVProvider.swift
       - path: UnifiedPlayer.swift
+      - path: PlayerScreen.swift
+      - path: PlayerComponents.swift
       - path: EmbeddedPlayer.swift
       - path: MatchesScreen.swift
+      - path: MatchCard.swift
       - path: ChannelsScreen.swift
       - path: Assets.xcassets
     settings:

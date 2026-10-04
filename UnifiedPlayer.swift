@@ -48,6 +48,9 @@ enum HLSQuality {
 final class UnifiedPlayerModel: ObservableObject {
     @Published private(set) var player: AVPlayer?
     @Published private(set) var embedded: URL?
+    @Published private(set) var embeddedReferrer: URL?
+    @Published private(set) var isPlaying = false
+    @Published private(set) var isMuted = false
     @Published private(set) var loading = false
     @Published private(set) var error: String?
     @Published private(set) var qualities: [StreamQuality] = []
@@ -57,6 +60,7 @@ final class UnifiedPlayerModel: ObservableObject {
     private var playlist = ""
     private var relay: LiveHLSRelay?
     private var observation: NSKeyValueObservation?
+    private var playbackObservation: NSKeyValueObservation?
     private var timeout: Task<Void, Never>?
     private var qualityTask: Task<Void, Never>?
     private var generation = UUID()
@@ -67,7 +71,13 @@ final class UnifiedPlayerModel: ObservableObject {
         do {
             guard let url = server.playbackURL else { throw APIError.server("رابط البث غير متاح.") }
             let media: URL
-            if server.type == "fajr_hls_page" {
+            if server.type == "ntv_page" {
+                let resolved = try await NTVProvider.source(page: url)
+                try Task.checkCancellation()
+                guard generation == run else { return }
+                guard let frame = resolved.servers.first?.playbackURL else { throw APIError.server("هذا البث غير متاح الآن.") }
+                embeddedReferrer = url; embedded = frame; loading = false; return
+            } else if server.type == "fajr_hls_page" {
                 let resolved = try await FajrStream.resolve(page: url)
                 guard generation == run else { return }
                 media = resolved.url; headers = resolved.headers
@@ -78,7 +88,7 @@ final class UnifiedPlayerModel: ObservableObject {
             } else if server.nativeVideo {
                 media = url; headers = [:]
             } else {
-                embedded = url; loading = false; return
+                embeddedReferrer = watch; embedded = url; loading = false; return
             }
             try Task.checkCancellation()
             guard generation == run else { return }
@@ -134,7 +144,15 @@ final class UnifiedPlayerModel: ObservableObject {
                 }
             }
         }
-        player = AVPlayer(playerItem: item); player?.play()
+        let current = AVPlayer(playerItem: item)
+        current.isMuted = isMuted
+        playbackObservation = current.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+            Task { @MainActor in
+                guard let self, self.generation == run else { return }
+                self.isPlaying = player.timeControlStatus == .playing
+            }
+        }
+        player = current; current.play()
         timeout = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 25_000_000_000) } catch { return }
             guard let self, self.generation == run, self.loading else { return }
@@ -146,94 +164,19 @@ final class UnifiedPlayerModel: ObservableObject {
         releasePlayer(); loading = false
         error = (failure as? APIError)?.errorDescription ?? "تعذّر تحميل البث. تحقق من الاتصال ثم أعد المحاولة."
     }
+    func togglePlayback() {
+        guard let player else { return }
+        if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+    }
+    func toggleMute() { isMuted.toggle(); player?.isMuted = isMuted }
     private func releasePlayer() {
-        timeout?.cancel(); timeout = nil; observation = nil
+        timeout?.cancel(); timeout = nil; observation = nil; playbackObservation = nil; isPlaying = false
         player?.pause(); player?.replaceCurrentItem(with: nil); player = nil
         relay?.stop(); relay = nil
     }
     func stop() {
         generation = UUID(); qualityTask?.cancel(); qualityTask = nil
-        releasePlayer(); source = nil; playlist = ""; headers = [:]
+        releasePlayer(); source = nil; playlist = ""; headers = [:]; embeddedReferrer = nil
     }
 }
 
-struct PlayerScreen: View {
-    @Environment(\.dismiss) private var dismiss
-    let playback: Playback
-    @StateObject private var model = UnifiedPlayerModel()
-    @StateObject private var web = EmbeddedPlayerState()
-    @State private var selectedID: String?
-    @State private var retry = UUID()
-    private var selected: StreamServer? {
-        playback.servers.first { $0.id == selectedID } ?? playback.servers.first { $0.is_default == true } ?? playback.servers.first
-    }
-    private var loadingKey: String { (selected?.id ?? "none") + retry.uuidString }
-    private var qualityLabel: String {
-        if model.embedded != nil { return web.qualities.first { $0.id == web.selectedQuality }?.label ?? "الجودة" }
-        return model.qualities.first { $0.id == model.selectedQuality }?.label ?? "الجودة"
-    }
-    init(playback: Playback) {
-        self.playback = playback
-        _selectedID = State(initialValue: playback.initialServerID)
-    }
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button { dismiss() } label: { Image(systemName: "xmark").padding(12) }.accessibilityLabel("إغلاق المشغّل")
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(playback.title).font(.subheadline.bold()).lineLimit(2)
-                    Text(playback.providerName).font(.caption).foregroundStyle(.gray)
-                }
-                Spacer(minLength: 8)
-                Button { retry = UUID() } label: { Image(systemName: "arrow.clockwise").padding(12) }.accessibilityLabel("إعادة تحميل البث")
-            }.padding(.horizontal, 8)
-            ZStack {
-                Color.black
-                if let embedded = model.embedded {
-                    EmbeddedPlayerView(url: embedded, referrer: playback.url, state: web).id(loadingKey)
-                } else { VideoPlayer(player: model.player) }
-                if model.loading { ProgressView("جاري تجهيز البث…").tint(.white) }
-                if let error = model.error ?? web.error {
-                    Color.black
-                    VStack(spacing: 18) {
-                        Image(systemName: "play.slash.fill").font(.largeTitle)
-                        Text(error).multilineTextAlignment(.center)
-                        Button("إعادة المحاولة") { retry = UUID() }.buttonStyle(.borderedProminent)
-                    }.padding(24)
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack(spacing: 20) {
-                Menu {
-                    ForEach(playback.servers) { server in
-                        Button { selectedID = server.id } label: {
-                            Label(server.name, systemImage: selected?.id == server.id ? "checkmark" : "play")
-                        }
-                    }
-                } label: { Label("مصدر البث", systemImage: "antenna.radiowaves.left.and.right") }
-                Spacer()
-                Menu {
-                    if model.embedded != nil {
-                        ForEach(web.qualities) { quality in
-                            Button { web.select(quality) } label: {
-                                Label(quality.label, systemImage: web.selectedQuality == quality.id ? "checkmark" : "sparkles.tv")
-                            }
-                        }
-                        if web.qualities.isEmpty { Text("خيارات الجودة داخل أدوات الفيديو إذا أتاحها المصدر") }
-                    } else {
-                        ForEach(model.qualities) { quality in
-                            Button { model.selectQuality(quality) } label: {
-                                Label(quality.label, systemImage: model.selectedQuality == quality.id ? "checkmark" : "sparkles.tv")
-                            }
-                        }
-                        if model.qualities.isEmpty { Text("تظهر الجودات بعد تحميل البث") }
-                    }
-                } label: { Label(qualityLabel, systemImage: "slider.horizontal.3") }
-            }.font(.subheadline.weight(.semibold)).padding(20).background(Color.white.opacity(0.07))
-        }.background(Color.black).foregroundStyle(.white).tint(.mint).statusBarHidden()
-            .task(id: loadingKey) {
-                web.reset()
-                if let selected { await model.load(server: selected, watch: playback.url) }
-            }
-            .onDisappear { model.stop(); web.reset() }
-    }
-}

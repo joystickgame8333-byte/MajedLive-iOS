@@ -8,8 +8,10 @@ struct MatchesScreen: View {
     @EnvironmentObject private var updates: AppUpdates
     @AppStorage("selectedLeague") private var selectedLeague = LeagueFilter.all
     @AppStorage("selectedLeagueTitle") private var selectedLeagueTitle = "كل الدوريات"
-    @State private var showingSettings = false
     @State private var day = 0
+    @State private var showingFilters = false
+    @State private var showingSearch = false
+    @State private var liveOnly = false
     @State private var provider = "all"
     @State private var search = ""
     @State private var playback: Playback?
@@ -22,7 +24,7 @@ struct MatchesScreen: View {
     }
     private var filteredMatches: [Match] {
         LeagueFilter.matches(providerMatches, selected: selectedLeague).filter {
-            search.isEmpty || ($0.home_team.name + " " + $0.away_team.name + " " + $0.tournament.name).localizedCaseInsensitiveContains(search)
+            (!liveOnly || $0.isLive) && (search.isEmpty || ($0.home_team.name + " " + $0.away_team.name + " " + $0.tournament.name).localizedCaseInsensitiveContains(search))
         }
     }
     private var groups: [Competition] {
@@ -45,9 +47,19 @@ struct MatchesScreen: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("dayPicker")
-                    SearchField(text: $search, prompt: "ابحث عن فريق أو بطولة")
-                    ProviderPicker(selection: $provider, options: [("all", "الكل"), ("majed", "ماجد"), ("ntv", "NTV")])
-                    leaguePicker
+                    if showingSearch { SearchField(text: $search, prompt: "ابحث عن فريق أو بطولة") }
+                    HStack(spacing: 12) {
+                        Button { liveOnly.toggle() } label: {
+                            Label("المباشر الآن", systemImage: "dot.radiowaves.left.and.right")
+                                .font(.caption.bold()).padding(10)
+                                .background(colors.accent.opacity(liveOnly ? 0.22 : 0.06), in: Capsule())
+                        }
+                        Spacer()
+                        Button { showingFilters = true } label: {
+                            Label(provider != "all" || selectedLeague != LeagueFilter.all ? "تصفية مفعّلة" : "تصفية", systemImage: "line.3.horizontal.decrease")
+                                .font(.caption.bold()).padding(10)
+                        }
+                    }
                     HStack {
                         Text(day == 0 ? "مباريات اليوم" : "مباريات غدًا")
                             .font(.title2.bold())
@@ -116,14 +128,26 @@ struct MatchesScreen: View {
                     Task { await updates.check() }
                 }
             }
-            .onChange(of: day) { _ in model.matches = []; model.updated = nil; selectedLeague = LeagueFilter.all }
+            .onChange(of: day) { _ in model.matches = []; model.updated = nil; selectedLeague = LeagueFilter.all; if day != 0 { liveOnly = false } }
             .onChange(of: provider) { _ in selectedLeague = LeagueFilter.all }
-            .sheet(isPresented: $showingSettings) { SettingsScreen(updates: updates) }
+            .sheet(isPresented: $showingFilters) {
+                NavigationStack {
+                    VStack(alignment: .leading, spacing: 24) {
+                        Text("مصدر المباريات").font(.headline)
+                        ProviderPicker(selection: $provider, options: [("all", "الكل"), ("majed", "ماجد"), ("ntv", "NTV")])
+                        Text("البطولة").font(.headline)
+                        leaguePicker
+                        Button("إظهار كل المباريات") { provider = "all"; selectedLeague = LeagueFilter.all; liveOnly = false; search = ""; showingFilters = false }
+                        Spacer()
+                    }.padding(24).navigationTitle("تصفية المباريات").navigationBarTitleDisplayMode(.inline)
+                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("تم") { showingFilters = false } } }
+                }.presentationDetents([.medium, .large])
+            }
             .fullScreenCover(item: $playback) { selected in PlayerScreen(playback: selected) }
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
             } message: { Text(message ?? "") }
-            .alert("تحديث التطبيق", isPresented: Binding(get: { !showingSettings && updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
+            .alert("تحديث التطبيق", isPresented: Binding(get: { updates.notice != nil }, set: { if !$0 { updates.notice = nil } })) {
                 Button("حسنًا", role: .cancel) { updates.notice = nil }
             } message: { Text(updates.notice ?? "") }
 
@@ -186,17 +210,12 @@ struct MatchesScreen: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(FootballBrand.name).font(.title3.bold())
-                Text("المباريات ومصادر البث").font(.caption).foregroundStyle(.secondary)
+                Text("كرة القدم، في مكان واحد").font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape").font(.title3).padding(10)
-                    .overlay(alignment: .topTrailing) {
-                        if updates.available != nil {
-                            Circle().fill(colors.accent).frame(width: 8, height: 8)
-                        }
-                    }
-            }.accessibilityLabel(updates.available == nil ? "الإعدادات" : "الإعدادات، تحديث جديد متاح")
+            Button { showingSearch.toggle(); if !showingSearch { search = "" } } label: {
+                Image(systemName: showingSearch ? "xmark" : "magnifyingglass").font(.title3).padding(10)
+            }.accessibilityLabel("البحث عن مباراة")
         }.padding(.vertical, 8)
     }
 
