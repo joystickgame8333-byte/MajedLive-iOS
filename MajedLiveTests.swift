@@ -90,6 +90,19 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertTrue(NTVProvider.embedServers(html: "<iframe src='https://ads.example'></iframe>", page: page).isEmpty)
     }
 
+    func testNTVUnwrapsOnlyPublishedFrameRegardlessOfAttributeOrder() throws {
+        let page = try XCTUnwrap(URL(string: "https://ntv.cx/embed?t=fresh"))
+        let html = """
+        <iframe src="https://chatmate.tv/ad" id="advertisement"></iframe>
+        <iframe src="https://player.example/live?x=1&amp;y=2" allowfullscreen id="streamIframe"></iframe>
+        """
+        XCTAssertEqual(NTVProvider.playerFrame(html: html, page: page)?.absoluteString, "https://player.example/live?x=1&y=2")
+        for bad in ["javascript:alert(1)", "http://player.example", "https://user:pass@player.example", "https://chatmate.tv/ad"] {
+            XCTAssertNil(NTVProvider.playerFrame(html: "<iframe id='streamIframe' src='\(bad)'></iframe>", page: page))
+        }
+        XCTAssertNil(NTVProvider.playerFrame(html: "<iframe src='https://ads.example'></iframe>", page: page))
+    }
+
     func testNTVSourceMenuPreservesSourceIndexAndRejectsForeignNavigation() throws {
         let page = try XCTUnwrap(URL(string: "https://ntv.cx/watch/titan/match"))
         let html = """

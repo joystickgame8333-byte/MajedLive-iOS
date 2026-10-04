@@ -134,6 +134,33 @@ enum NTVProvider {
         return BroadcastSource(id: "ntv", name: "NTV", watchURL: page, servers: servers)
     }
 
+    struct EmbeddedSource { let url: URL; let referrer: URL }
+    static func playerFrame(html: String, page: URL) -> URL? {
+        // Only the published video frame, never an advertising iframe.
+        for tag in captured(#"(<iframe\b[^>]*>)"#, in: html).compactMap(\.first) {
+            guard !captured(#"\bid\s*=\s*["']streamIframe["']"#, in: tag).isEmpty,
+                  let value = captured(#"\bsrc\s*=\s*["']([^"']+)["']"#, in: tag).first?.first,
+                  let url = URL(string: unescape(value), relativeTo: page)?.absoluteURL,
+                  url.scheme == "https", url.host != nil, url.user == nil, url.password == nil,
+                  !PlayerAdProtection.isBlocked(url) else { continue }
+            return url
+        }
+        return nil
+    }
+    static func embeddedSource(_ url: URL, referrer: URL) async throws -> EmbeddedSource {
+        guard url.host == origin.host, url.path == "/embed" else {
+            return EmbeddedSource(url: url, referrer: referrer)
+        }
+        let (data, response) = try await PublishedStream.request(url, headers: ["Referer": referrer.absoluteString])
+        let page = response.url ?? url
+        guard let html = String(data: data, encoding: .utf8), let frame = playerFrame(html: html, page: page) else {
+            throw APIError.server("لم ينشر NTV رابط المشغّل لهذا المصدر حاليًا. اختر بثًا آخر.")
+        }
+        // Keep the real parent Referer but load the provider as the top-level page.
+        // This avoids the site's hidden wrapper and nested-frame initialization on iOS.
+        return EmbeddedSource(url: frame, referrer: page)
+    }
+
     struct ChannelPage: Decodable {
         let success: Bool
         let channels: [Channel]

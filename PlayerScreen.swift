@@ -137,6 +137,12 @@ struct PlayerScreen: View {
                     .background(.black.opacity(0.75), in: Capsule()); Spacer() }
                     .padding(.top, cinema ? 55 : 12).foregroundStyle(.white).allowsHitTesting(false)
             }
+            if web.awaitingTap && !web.started && failure == nil {
+                Button(action: web.play) {
+                    Label("اضغط لتشغيل البث", systemImage: "play.fill").font(.headline).padding(16)
+                        .background(.black.opacity(0.8), in: Capsule()).foregroundStyle(.white)
+                }
+            }
             if let failure {
                 PlayerFailure(message: failure, canChange: playback.servers.count > 1,
                     retry: retryCurrent, change: { panel = .sources })

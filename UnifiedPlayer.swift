@@ -76,7 +76,9 @@ final class UnifiedPlayerModel: ObservableObject {
                 try Task.checkCancellation()
                 guard generation == run else { return }
                 guard let frame = resolved.servers.first?.playbackURL else { throw APIError.server("هذا البث غير متاح الآن.") }
-                embeddedReferrer = url; embedded = frame; loading = false; return
+                let direct = try await NTVProvider.embeddedSource(frame, referrer: url)
+                guard generation == run, !Task.isCancelled else { return }
+                embeddedReferrer = direct.referrer; embedded = direct.url; loading = false; return
             } else if server.type == "fajr_hls_page" {
                 let resolved = try await FajrStream.resolve(page: url)
                 guard generation == run else { return }
@@ -88,7 +90,9 @@ final class UnifiedPlayerModel: ObservableObject {
             } else if server.nativeVideo {
                 media = url; headers = [:]
             } else {
-                embeddedReferrer = watch; embedded = url; loading = false; return
+                let direct = try await NTVProvider.embeddedSource(url, referrer: watch)
+                guard generation == run, !Task.isCancelled else { return }
+                embeddedReferrer = direct.referrer; embedded = direct.url; loading = false; return
             }
             try Task.checkCancellation()
             guard generation == run else { return }

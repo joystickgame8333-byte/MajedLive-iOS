@@ -10,7 +10,20 @@ final class EmbeddedPlayerState: ObservableObject {
     @Published var awaitingTap = false
     weak var webView: WKWebView?
     var frame: WKFrameInfo?
-    func reset() { qualities = []; selectedQuality = -1; error = nil; started = false; awaitingTap = false; frame = nil; webView = nil }
+    var playbackFrame: WKFrameInfo?
+    func reset() { qualities = []; selectedQuality = -1; error = nil; started = false; awaitingTap = false; frame = nil; playbackFrame = nil; webView = nil }
+    func play() {
+        guard let webView, let playbackFrame else { return }
+        let script = """
+        (() => {
+          const video = Array.from(document.querySelectorAll('video')).sort((a,b) => b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];
+          if (!video) return;
+          video.playsInline = true;
+          video.play().catch(() => { video.muted = true; video.play().catch(() => window.webkit.messageHandlers.footballQuality.postMessage({kind:'error',code:'play'})); });
+        })();
+        """
+        webView.evaluateJavaScript(script, in: playbackFrame, in: .page) { _ in }
+    }
     func select(_ quality: StreamQuality) {
         guard qualities.contains(quality), let webView, let frame else { return }
         webView.evaluateJavaScript("window.jwplayer().setCurrentQuality(\(quality.id));", in: frame, in: .page) { [weak self] result in
@@ -41,9 +54,12 @@ struct EmbeddedPlayerView: UIViewRepresentable {
               const videos = Array.from(document.querySelectorAll('video')).filter(v => v.clientWidth > 100 && v.clientHeight > 60);
               const video = videos.sort((a,b) => b.clientWidth*b.clientHeight-a.clientWidth*a.clientHeight)[0];
               if (video) {
+                video.playsInline = true;
+                video.setAttribute('playsinline','');
+                video.setAttribute('webkit-playsinline','');
                 if (!video.paused && video.readyState >= 2 && video.currentTime !== lastTime) {
                   send({kind:'playing'}); lastTime = video.currentTime; errorSince = 0;
-                } else if (video.paused && video.readyState >= 2 && !video.error) {
+                } else if (video.paused && !video.error && (video.currentSrc || video.src)) {
                   send({kind:'tap'});
                 }
                 if (video.error) send({kind:'error', code:video.error.code});
@@ -86,7 +102,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         request.timeoutInterval = 25
         // Install rules before the first request, including every nested frame.
         let coordinator = context.coordinator
-        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "football-player-ads-v1", encodedContentRuleList: PlayerAdProtection.rules) { [weak view, weak coordinator] rules, _ in
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "football-player-ads-v2", encodedContentRuleList: PlayerAdProtection.rules) { [weak view, weak coordinator] rules, _ in
             DispatchQueue.main.async {
                 guard let view, let coordinator, coordinator.active else { return }
                 guard let rules else { state.error = "تعذّر تجهيز حجب الإعلانات. أعد المحاولة."; return }
@@ -112,7 +128,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
                   let payload = message.body as? [String: Any] else { return }
             if let kind = payload["kind"] as? String {
                 if kind == "playing" { state.started = true; state.awaitingTap = false; state.error = nil }
-                if kind == "tap", !state.started { state.awaitingTap = true }
+                if kind == "tap", !state.started { state.playbackFrame = message.frameInfo; state.awaitingTap = true }
                 if kind == "error", !state.started { state.error = "مصدر البث أبلغ عن خطأ في تحميل الفيديو." }
                 return
             }
@@ -140,7 +156,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
         private func failed(_ error: Error) {
             guard active, (error as NSError).code != NSURLErrorCancelled else { return }
-            state.error = "تعذّر تحميل هذا البث. أعد المحاولة أو اختر مصدرًا آخر."
+            state.error = "تعذّر الاتصال بالمشغّل (\((error as NSError).code)). اختر بثًا آخر."
         }
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { state.error = "توقف البث. اضغط إعادة المحاولة." }
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
@@ -150,7 +166,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
 
 // Target advertising only: media CDNs, player libraries and signed stream URLs remain usable.
 enum PlayerAdProtection {
-    static let domains = ["chatmate.tv", "chaturbate.com", "stripchat.com", "exoclick.com", "exosrv.com", "exdynsrv.com", "trafficjunky.net", "juicyads.com", "popads.net", "popcash.net", "adsterra.com", "doubleclick.net", "googlesyndication.com", "adsco.re"]
+    static let domains = ["hubeamily.com", "trovesleepit.com", "chatmate.tv", "chaturbate.com", "stripchat.com", "exoclick.com", "exosrv.com", "exdynsrv.com", "trafficjunky.net", "juicyads.com", "popads.net", "popcash.net", "adsterra.com", "doubleclick.net", "googlesyndication.com", "adsco.re"]
     static func isBlocked(_ url: URL?) -> Bool {
         guard let host = url?.host?.lowercased() else { return false }
         return domains.contains { host == $0 || host.hasSuffix("." + $0) }
@@ -186,7 +202,7 @@ enum PlayerAdProtection {
           let el = button.parentElement;
           for (let depth = 0; el && el !== document.body && depth < 5; depth++, el = el.parentElement) {
             const style = getComputedStyle(el), rect = el.getBoundingClientRect();
-            if ((style.position === 'fixed' || style.position === 'absolute') && rect.width > 150 && rect.height > 100 && rect.width * rect.height < innerWidth * innerHeight * 0.95) { hide(el); break; }
+            if (!el.querySelector('video, #player, .jwplayer, [data-player]') && (style.position === 'fixed' || style.position === 'absolute') && rect.width > 150 && rect.height > 100 && rect.width * rect.height < innerWidth * innerHeight * 0.95) { hide(el); break; }
           }
         });
       };
