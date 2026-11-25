@@ -21,16 +21,22 @@ struct MatchesScreen: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private var providerMatches: [Match] {
-        model.matches.filter { provider == "all" || $0.providerID == provider }
+        guard provider == "all" else { return model.matches.filter { $0.providerID == provider } }
+        let majed = Dictionary(grouping: model.matches.filter { $0.providerID == "majed" && $0.playbackURL != nil }, by: \.time)
+        return model.matches.filter { match in
+            guard match.providerID == "ntv", match.isLive else { return true }
+            return majed[match.time]?.contains { $0.isLive && NTVProvider.matchesFixture($0, match) } != true
+        }
     }
     private var filteredMatches: [Match] {
         LeagueFilter.matches(providerMatches, selected: selectedLeague).filter {
             (!liveOnly || $0.isLive) && (search.isEmpty || ($0.home_team.name + " " + $0.away_team.name + " " + $0.tournament.name).localizedCaseInsensitiveContains(search))
         }
     }
-    private var groups: [Competition] {
-        var seen = Set<String>()
-        return filteredMatches.map(\.tournament).filter { seen.insert($0.filterKey).inserted }
+    private var featuredMatch: Match? {
+        guard day == 0, search.isEmpty else { return nil }
+        let playable = filteredMatches.filter { $0.isLive && $0.playbackURL != nil }
+        return playable.first { $0.providerID == "majed" } ?? playable.first
     }
     private var leagues: [Competition] {
         var seen = Set<String>()
@@ -41,46 +47,10 @@ struct MatchesScreen: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    Picker("اختيار اليوم", selection: $day) {
-                        Text("اليوم").tag(0)
-                        Text("غدًا").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("dayPicker")
-                    if provider != "majed" {
-                        Menu {
-                            ForEach(NTVProvider.sections, id: \.self) { section in
-                                Button { ntvServer = section; selectedLeague = LeagueFilter.all; model.matches = []; model.updated = nil } label: {
-                                    if section == ntvServer { Label(section.uppercased(), systemImage: "checkmark") }
-                                    else { Text(section.uppercased()) }
-                                }
-                            }
-                        } label: {
-                            HStack { Label("مباريات NTV · " + ntvServer.uppercased(), systemImage: "play.tv"); Spacer(); Image(systemName: "chevron.down") }
-                                .font(.subheadline.bold()).padding(14).background(colors.card, in: RoundedRectangle(cornerRadius: 14))
-                        }
-                    }
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    dateStrip
                     if showingSearch { SearchField(text: $search, prompt: "ابحث عن فريق أو بطولة") }
-                    HStack(spacing: 12) {
-                        Button { liveOnly.toggle() } label: {
-                            Label("المباشر الآن", systemImage: "dot.radiowaves.left.and.right")
-                                .font(.caption.bold()).padding(10)
-                                .background(colors.accent.opacity(liveOnly ? 0.22 : 0.06), in: Capsule())
-                        }
-                        Spacer()
-                        Button { showingFilters = true } label: {
-                            Label(provider != "all" || selectedLeague != LeagueFilter.all ? "تصفية مفعّلة" : "تصفية", systemImage: "line.3.horizontal.decrease")
-                                .font(.caption.bold()).padding(10)
-                        }
-                    }
-                    HStack {
-                        Text(day == 0 ? "مباريات اليوم" : "مباريات غدًا")
-                            .font(.title2.bold())
-                        Spacer()
-                        Text("\(filteredMatches.count) مباريات")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    scheduleControls
                     if let error = model.error {
                         VStack(spacing: 12) {
                             Label(error, systemImage: "wifi.exclamationmark")
@@ -94,23 +64,27 @@ struct MatchesScreen: View {
                     } else if filteredMatches.isEmpty && model.error == nil {
                         VStack(spacing: 14) {
                             Image(systemName: "sportscourt").font(.largeTitle).foregroundStyle(colors.accent)
-                            Text(selectedLeague == LeagueFilter.all ? "لا توجد مباريات تطابق اختيارك" : "لا توجد مباريات لهذا الدوري اليوم").font(.headline)
+                            Text("لا توجد مباريات تطابق اختيارك").font(.headline)
                             Text("اسحب للأسفل لتحديث الجدول").font(.subheadline).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity).padding(.vertical, 55)
                     } else {
-                        matchList
+                        if let featured = featuredMatch {
+                            FeaturedMatchCard(match: featured, checking: checkingMatch == featured.id,
+                                              anotherMatchIsOpening: checkingMatch != nil) {
+                                Task { await open(featured) }
+                            }
+                        }
+                        matchList(excluding: featuredMatch?.id)
                     }
                     if let updated = model.updated {
                         Text("آخر تحديث: \(updated.formatted(date: .omitted, time: .shortened))")
                             .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.bottom, 12)
                     }
-                }.padding(20)
+                }.padding(.horizontal, 16).padding(.vertical, 14)
             }
             .background(colors.background)
             .safeAreaInset(edge: .top, spacing: 0) {
-                header.padding(.horizontal, 20)
-                    .background(colors.card.ignoresSafeArea(edges: .top))
-                    .overlay(alignment: .bottom) { Rectangle().fill(colors.accent.opacity(0.12)).frame(height: 1) }
+                header
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if updates.available != nil {
@@ -146,17 +120,27 @@ struct MatchesScreen: View {
             .onChange(of: provider) { _ in selectedLeague = LeagueFilter.all }
             .sheet(isPresented: $showingFilters) {
                 NavigationStack {
-                    VStack(alignment: .leading, spacing: 24) {
-                        Text("مصدر المباريات").font(.headline)
-                        ProviderPicker(selection: $provider, options: [("all", "الكل"), ("majed", "ماجد"), ("ntv", "NTV")])
-                        Text("البطولة").font(.headline)
-                        leaguePicker
-                        Button("إظهار كل المباريات") { provider = "all"; selectedLeague = LeagueFilter.all; liveOnly = false; search = ""; showingFilters = false }
-                        Spacer()
-                    }.padding(24).navigationTitle("تصفية المباريات").navigationBarTitleDisplayMode(.inline)
+                    Form {
+                        Section("مصدر الجدول") {
+                            ProviderPicker(selection: $provider, options: [("all", "الكل"), ("majed", "ماجد"), ("ntv", "NTV")])
+                            if provider != "majed" {
+                                Picker("قسم NTV", selection: $ntvServer) {
+                                    ForEach(NTVProvider.sections, id: \.self) { Text($0.uppercased()).tag($0) }
+                                }
+                            }
+                        }
+                        Section("البطولة") { leaguePicker }
+                        Section {
+                            Button("إظهار كل المباريات") {
+                                provider = "all"; selectedLeague = LeagueFilter.all
+                                liveOnly = false; search = ""; showingFilters = false
+                            }
+                        }
+                    }.navigationTitle("تصفية المباريات").navigationBarTitleDisplayMode(.inline)
                         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("تم") { showingFilters = false } } }
-                }.presentationDetents([.medium, .large])
+                }.presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
             }
+            .onChange(of: ntvServer) { _ in model.matches = []; model.updated = nil; selectedLeague = LeagueFilter.all }
             .fullScreenCover(item: $playback) { selected in PlayerScreen(playback: selected) }
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
@@ -168,28 +152,86 @@ struct MatchesScreen: View {
         }
     }
 
-    private var matchList: some View {
-        LazyVStack(spacing: 16) {
-            ForEach(groups, id: \.filterKey) { league in
-                leagueGroup(league)
-            }
+    private var dateStrip: some View {
+        HStack(spacing: 8) {
+            dateButton("أمس", offset: -1)
+            dateButton("اليوم", offset: 0)
+            dateButton("غدًا", offset: 1)
+        }
+        .accessibilityIdentifier("dayPicker")
+    }
+
+    private func dateButton(_ title: String, offset: Int) -> some View {
+        let date = Site.date(offset: offset)
+        let dateComponents = date.split(separator: "-")
+        let number = dateComponents.last.flatMap { Int($0) } ?? 0
+        return Button { day = offset } label: {
+            VStack(spacing: 4) {
+                Text(title).font(.caption.weight(.semibold))
+                Text(number.formatted()).font(.title3.weight(.bold)).monospacedDigit()
+            }.frame(maxWidth: .infinity, minHeight: 61)
+                .foregroundStyle(day == offset ? Color.white : Color.primary)
+                .background(day == offset ? colors.action : colors.card, in: RoundedRectangle(cornerRadius: 15))
+        }.buttonStyle(.plain).accessibilityLabel(MatchInformation.dateTitle(date))
+            .accessibilityAddTraits(day == offset ? [.isSelected] : [])
+    }
+
+    private var scheduleControls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { scheduleTitle; Spacer(minLength: 4); filterButtons }
+            VStack(alignment: .leading, spacing: 2) { scheduleTitle; HStack(spacing: 8) { filterButtons } }
         }
     }
-    private func leagueGroup(_ league: Competition) -> some View {
-        let entries = filteredMatches.filter { $0.tournament.filterKey == league.filterKey }
-        return VStack(alignment: .leading, spacing: 12) {
+
+    private var scheduleTitle: some View {
+        Text("جدول المباريات").font(.title3.bold()).fixedSize()
+    }
+
+    @ViewBuilder private var filterButtons: some View {
+        Button { liveOnly.toggle() } label: {
+            Label("مباشر", systemImage: "dot.radiowaves.left.and.right")
+                .font(.caption.weight(.semibold)).fixedSize()
+                .padding(.horizontal, 9).frame(minHeight: 44)
+                .background(liveOnly ? colors.highlight : colors.card, in: Capsule())
+        }.buttonStyle(.plain).foregroundStyle(liveOnly ? colors.accent : Color.primary)
+            .accessibilityAddTraits(liveOnly ? [.isSelected] : [])
+        Button { showingFilters = true } label: {
+            Label("تصفية", systemImage: provider != "all" || selectedLeague != LeagueFilter.all
+                  ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
+                .font(.caption.weight(.semibold)).fixedSize()
+                .padding(.horizontal, 9).frame(minHeight: 44)
+                .background(colors.card, in: Capsule())
+        }.buttonStyle(.plain)
+    }
+
+    private func matchList(excluding featuredID: String?) -> some View {
+        let matches = filteredMatches.filter { $0.id != featuredID }
+        let grouped = Dictionary(grouping: matches) { $0.tournament.filterKey }
+        var seen = Set<String>()
+        let tournaments = matches.map(\.tournament).filter { seen.insert($0.filterKey).inserted }
+        return ForEach(tournaments, id: \.filterKey) { tournament in
+            leagueGroup(tournament, entries: grouped[tournament.filterKey, default: []])
+        }
+    }
+
+    private func leagueGroup(_ league: Competition, entries: [Match]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
-                RemoteLogo(path: league.logo, size: 24)
-                Text(league.name).font(.headline)
+                RemoteLogo(path: league.logo, size: 23).accessibilityHidden(true)
+                Text(league.name).font(.subheadline.bold())
                 Spacer()
                 Text("\(entries.count)").font(.caption).foregroundStyle(.secondary)
-            }.padding(.top, 8)
+            }.padding(.horizontal, 13).padding(.vertical, 11)
+                .background(colors.highlight.opacity(0.65))
+                .accessibilityAddTraits(.isHeader)
             ForEach(entries) { match in
-                MatchCard(match: match, checking: checkingMatch == match.id) {
+                Rectangle().fill(colors.divider).frame(height: 1).accessibilityHidden(true)
+                MatchCard(match: match, checking: checkingMatch == match.id, anotherMatchIsOpening: checkingMatch != nil) {
                     Task { await open(match) }
-                }.disabled(checkingMatch != nil)
+                }
             }
-        }
+        }.background(colors.card, in: RoundedRectangle(cornerRadius: 17))
+            .clipShape(RoundedRectangle(cornerRadius: 17))
     }
 
     private var leaguePicker: some View {
@@ -217,20 +259,13 @@ struct MatchesScreen: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12).fill(colors.accent).frame(width: 40, height: 40)
-                Image(systemName: "soccerball").font(.system(size: 23)).foregroundStyle(.white)
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(FootballBrand.name).font(.title3.bold())
-                Text("كرة القدم، في مكان واحد").font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 4)
+        FootballSectionHeader(title: "المباريات", subtitle: FootballBrand.name, icon: "soccerball") {
             Button { showingSearch.toggle(); if !showingSearch { search = "" } } label: {
-                Image(systemName: showingSearch ? "xmark" : "magnifyingglass").font(.title3).padding(10)
-            }.accessibilityLabel("البحث عن مباراة")
-        }.padding(.vertical, 8)
+                Image(systemName: showingSearch ? "xmark" : "magnifyingglass")
+                    .font(.title3.weight(.medium)).frame(width: 44, height: 44)
+                    .background(colors.highlight, in: Circle())
+            }.buttonStyle(.plain).accessibilityLabel(showingSearch ? "إغلاق البحث" : "البحث عن مباراة")
+        }
     }
 
     @MainActor private func open(_ match: Match) async {
@@ -247,7 +282,7 @@ struct MatchesScreen: View {
                 await model.refresh(offset: day, ntvServer: ntvServer)
                 return
             }
-            let sources = try await BroadcastCatalog.sources(for: current)
+            let sources = try await BroadcastCatalog.sources(for: current, alongside: model.matches)
             guard !sources.isEmpty else { message = "لا توجد مصادر بث متاحة لهذه المباراة حاليًا."; return }
             let title = "\(current.home_team.name) × \(current.away_team.name)"
             playback = BroadcastCatalog.playback(from: sources, title: title)

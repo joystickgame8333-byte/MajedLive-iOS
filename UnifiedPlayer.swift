@@ -188,6 +188,9 @@ final class UnifiedPlayerModel: ObservableObject {
     func stop() {
         generation = UUID(); qualityTask?.cancel(); qualityTask = nil
         releasePlayer(); source = nil; playlist = ""; headers = [:]; embeddedReferrer = nil
+        embedded = nil
+        loading = false
+        error = nil
     }
 }
 

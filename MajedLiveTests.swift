@@ -3,18 +3,21 @@ import CoreGraphics
 @testable import MajedLive
 
 final class MajedLiveTests: XCTestCase {
-    func testFallbackTriesOnlyUnfailedAvailableSourcesAndStopsAfterTwoSwitches() {
+    func testFallbackTriesOnlyUnfailedAvailableSourcesAndStopsAfterTwoSwitches() throws {
         func server(_ id: String, enabled: Bool = true) -> StreamServer {
             StreamServer(id: id, name: id, type: "iframe", url: "https://example.com/\(id)", enabled: enabled, is_default: false, priority: 0)
         }
-        let sources = [server("one"), server("disabled", enabled: false), server("two"), server("three"), server("four")]
+        let servers = [server("one"), server("disabled", enabled: false), server("two"), server("three"), server("four")]
+        let url = try XCTUnwrap(URL(string: "https://example.com/watch"))
+        let source = BroadcastSource(id: "provider", name: "Provider", watchURL: url, servers: servers)
+        let choices = Playback(title: "Match", sources: [source]).choices
         var attempts = PlaybackAttempts()
-        XCTAssertEqual(attempts.next(after: "one", servers: sources)?.id, "two")
-        XCTAssertEqual(attempts.next(after: "two", servers: sources)?.id, "three")
-        XCTAssertNil(attempts.next(after: "three", servers: sources))
-        XCTAssertEqual(attempts.failed, Set(["one", "two", "three"]))
+        XCTAssertEqual(attempts.next(after: "provider/one", choices: choices)?.server.id, "two")
+        XCTAssertEqual(attempts.next(after: "provider/two", choices: choices)?.server.id, "three")
+        XCTAssertNil(attempts.next(after: "provider/three", choices: choices))
+        XCTAssertEqual(attempts.failed, Set(["provider/one", "provider/two", "provider/three"]))
         var single = PlaybackAttempts()
-        XCTAssertNil(single.next(after: "one", servers: [sources[0]]))
+        XCTAssertNil(single.next(after: "provider/one", choices: [choices[0]]))
     }
 
     func testFullscreenUsesLandscapeCanvasAndNormalViewKeepsVideoProportions() {
@@ -314,10 +317,10 @@ final class MajedLiveTests: XCTestCase {
         let watch = try XCTUnwrap(URL(string: "https://example.com/watch"))
         let source = BroadcastSource(id: "provider", name: "Provider", watchURL: watch, servers: [first, chosen])
         let playback = source.playback(title: "Match", server: chosen)
-        XCTAssertEqual(playback.initialServerID, "two")
-        XCTAssertEqual(playback.url, watch)
-        XCTAssertEqual(playback.providerName, "Provider")
-        XCTAssertEqual(playback.servers.count, 2)
+        XCTAssertEqual(playback.initialChoiceID, "provider/two")
+        XCTAssertEqual(playback.choices.last?.source.watchURL, watch)
+        XCTAssertEqual(playback.sources.map(\.name), ["Provider"])
+        XCTAssertEqual(playback.choices.count, 2)
     }
 
     func testMajedAndNTVKeepTheirOwnWatchPagesInOnePlayer() throws {
@@ -325,16 +328,16 @@ final class MajedLiveTests: XCTestCase {
         let ntvPage = try XCTUnwrap(URL(string: "https://ntv.cx/watch/kobra/example"))
         let majed = StreamServer(id: "majed-watch", name: "ماجد", type: "majed_watch", url: majedPage.absoluteString,
                                  enabled: true, is_default: true, priority: 0)
-        let ntv = StreamServer(id: "ntv-embed-0", name: "NTV", type: "ntv_embed", url: "https://ntv.cx/embed?stream=example",
+        let ntv = StreamServer(id: majed.id, name: "NTV", type: "ntv_embed", url: "https://ntv.cx/embed?stream=example",
                                enabled: true, is_default: nil, priority: 0)
         let playback = try XCTUnwrap(BroadcastCatalog.playback(from: [
             BroadcastSource(id: "majed", name: "ماجد", watchURL: majedPage, servers: [majed]),
             BroadcastSource(id: "ntv", name: "NTV", watchURL: ntvPage, servers: [ntv])
         ], title: "Match"))
-        XCTAssertEqual(playback.initialServerID, majed.id)
-        XCTAssertEqual(playback.servers.map(\.id), [majed.id, ntv.id])
-        XCTAssertEqual(playback.watchURLs[majed.id], majedPage)
-        XCTAssertEqual(playback.watchURLs[ntv.id], ntvPage)
+        XCTAssertEqual(playback.initialChoiceID, "majed/\(majed.id)")
+        XCTAssertEqual(playback.choices.map(\.id), ["majed/\(majed.id)", "ntv/\(ntv.id)"])
+        XCTAssertEqual(playback.choices.first?.source.watchURL, majedPage)
+        XCTAssertEqual(playback.choices.last?.source.watchURL, ntvPage)
     }
 
     func testUpdateAlertsRequirePublishedIPAAndSkipInstalledOrAlreadyNotifiedBuilds() throws {

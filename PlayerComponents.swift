@@ -11,76 +11,95 @@ struct PlayerHeading: View {
     let close: () -> Void
     var body: some View {
         HStack(spacing: 12) {
-            Button(action: close) { Image(systemName: "chevron.right").font(.headline).frame(width: 44, height: 44) }
+            Button(action: close) {
+                Image(systemName: "chevron.backward")
+                    .font(.headline).frame(width: 44, height: 44)
+                    .background(.primary.opacity(0.06), in: Circle())
+            }.buttonStyle(.plain)
                 .accessibilityLabel("الرجوع")
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.subheadline.bold()).lineLimit(2)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
-        }.padding(.horizontal, 12)
+        }.padding(.horizontal, 16)
     }
 }
 
 struct PlayerDetails: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var scheme
-    let title: String
-    let provider: String
-    let sourceNumber: Int
-    let sourceCount: Int
+    let sources: [BroadcastSource]
+    let activeSourceID: String?
+    let activeServerName: String?
     let quality: String
     let notice: String?
+    let selectSource: (BroadcastSource) -> Void
     let expand: () -> Void
     let chooseSource: () -> Void
     let chooseQuality: () -> Void
     let retry: () -> Void
     private var colors: ThemeColors { ThemeColors(theme: theme, dark: scheme == .dark) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             if let notice {
                 Label(notice, systemImage: "arrow.triangle.2.circlepath").font(.caption)
                     .foregroundStyle(colors.accent).padding(12).frame(maxWidth: .infinity, alignment: .leading)
                     .background(colors.card, in: RoundedRectangle(cornerRadius: 14))
             }
-            Text(title).font(.title3.bold()).fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Label(provider, systemImage: "tv").font(.subheadline).foregroundStyle(.secondary)
-                Spacer()
-                Text("\(sourceCount) مصادر بث").font(.caption).foregroundStyle(.secondary)
+            ViewThatFits(in: .horizontal) {
+                HStack { sourceHeading; Spacer(minLength: 8); sourceListButton }
+                VStack(alignment: .leading, spacing: 2) { sourceHeading; sourceListButton }
             }
-            Button(action: expand) {
-                Label("شاهد بملء الشاشة", systemImage: "arrow.up.left.and.arrow.down.right")
-                    .font(.headline).frame(maxWidth: .infinity).padding(16)
-            }.buttonStyle(.plain).foregroundStyle(.white)
-                .background(colors.accent, in: RoundedRectangle(cornerRadius: 16))
-            HStack(spacing: 12) {
-                PlayerSettingButton(title: "البث", value: "بث \(sourceNumber)", symbol: "play.rectangle", action: chooseSource)
-                PlayerSettingButton(title: "الجودة", value: quality, symbol: "slider.horizontal.3", action: chooseQuality)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(sources) { source in
+                        let active = source.id == activeSourceID
+                        Button { selectSource(source) } label: {
+                            Label(source.name, systemImage: active ? "checkmark.circle.fill" : "play.circle")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 15).frame(minHeight: 44)
+                                .foregroundStyle(active ? Color.white : Color.primary)
+                                .background(active ? colors.action : colors.card, in: Capsule())
+                        }.buttonStyle(.plain)
+                            .accessibilityAddTraits(active ? [.isSelected] : [])
+                            .accessibilityIdentifier("broadcast-provider-\(source.id)")
+                    }
+                }
             }
-            HStack {
-                Text("إذا توقف الفيديو، جرّب بثًا آخر.").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button(action: retry) { Label("إعادة تحميل", systemImage: "arrow.clockwise").font(.caption.bold()) }
-            }.padding(.top, 4)
+            if let activeServerName {
+                Text(activeServerName).font(.caption).foregroundStyle(.secondary)
+            }
+            Divider()
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) { playerActions }
+                VStack(alignment: .leading, spacing: 2) { playerActions }
+            }
         }
     }
-}
 
-private struct PlayerSettingButton: View {
-    @Environment(\.appTheme) private var theme
-    @Environment(\.colorScheme) private var scheme
-    let title: String
-    let value: String
-    let symbol: String
-    let action: () -> Void
-    var body: some View {
+    private var sourceHeading: some View { Text("مصادر البث").font(.title3.bold()).fixedSize() }
+
+    private var sourceListButton: some View {
+        Button(action: chooseSource) {
+            Label("كل السيرفرات", systemImage: "list.bullet").font(.subheadline.weight(.medium))
+                .padding(.horizontal, 8).frame(minHeight: 44)
+        }.buttonStyle(.plain).foregroundStyle(colors.accent).accessibilityIdentifier("broadcast-source-list")
+    }
+
+    @ViewBuilder private var playerActions: some View {
+        action("الجودة", quality, "slider.horizontal.3", chooseQuality)
+        action("ملء الشاشة", nil, "arrow.up.left.and.arrow.down.right", expand)
+        action("إعادة تحميل", nil, "arrow.clockwise", retry)
+    }
+
+    private func action(_ title: String, _ subtitle: String?, _ symbol: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                Label(title, systemImage: symbol).font(.caption).foregroundStyle(.secondary)
-                HStack { Text(value).font(.subheadline.bold()).lineLimit(1); Spacer(); Image(systemName: "chevron.down").font(.caption2) }
-            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                .background(theme.card(dark: scheme == .dark), in: RoundedRectangle(cornerRadius: 16))
+            VStack(alignment: .leading, spacing: 3) {
+                Label(title, systemImage: symbol).font(.footnote.weight(.semibold))
+                if let subtitle { Text(subtitle).font(.caption2).foregroundStyle(.secondary) }
+            }.fixedSize(horizontal: true, vertical: false)
+                .padding(.horizontal, 9).frame(minHeight: 44)
         }.buttonStyle(.plain)
     }
 }
@@ -109,32 +128,35 @@ struct PlayerFailure: View {
 struct PlayerOptions: View {
     @Environment(\.dismiss) private var dismiss
     let panel: PlayerPanel
-    let servers: [StreamServer]
+    let playback: Playback
     let selectedID: String?
     let failed: Set<String>
     let qualities: [StreamQuality]
     let qualityID: Int
-    let selectServer: (StreamServer) -> Void
+    let selectServer: (Playback.Choice) -> Void
     let selectQuality: (StreamQuality) -> Void
     var body: some View {
         NavigationStack {
             List {
                 if panel == .sources {
-                    Section {
-                        ForEach(Array(servers.enumerated()), id: \.element.id) { index, server in
-                            Button { selectServer(server) } label: {
-                                HStack(spacing: 14) {
-                                    Image(systemName: selectedID == server.id ? "checkmark.circle.fill" : "play.circle")
-                                    VStack(alignment: .leading, spacing: 5) {
-                                        Text("بث \(index + 1)").font(.headline)
-                                        Text(failed.contains(server.id) ? "لم يعمل في المحاولة السابقة" : server.name)
-                                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                    }
-                                    Spacer()
-                                }.padding(.vertical, 6)
+                    ForEach(playback.sources) { source in
+                        Section(source.name) {
+                            ForEach(playback.choices.filter { $0.source.id == source.id }) { choice in
+                                Button { selectServer(choice) } label: {
+                                    HStack(spacing: 14) {
+                                        Image(systemName: selectedID == choice.id ? "checkmark.circle.fill" : "play.circle")
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(choice.server.name).font(.headline)
+                                            if failed.contains(choice.id) {
+                                                Text("تعذّر في المحاولة السابقة").font(.caption).foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        Spacer(minLength: 0)
+                                    }.padding(.vertical, 6)
+                                }.accessibilityAddTraits(selectedID == choice.id ? [.isSelected] : [])
                             }
                         }
-                    } footer: { Text("يجرب التطبيق مصدرًا بديلًا عند الفشل، ويمكنك الاختيار يدويًا.") }
+                    }
                 } else {
                     Section {
                         ForEach(qualities) { quality in

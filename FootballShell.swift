@@ -4,6 +4,35 @@ enum FootballBrand {
     static let name = "الكرة عمر"
 }
 
+struct FootballSectionHeader<Action: View>: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var scheme
+    let title: String
+    let subtitle: String
+    let icon: String
+    @ViewBuilder let action: () -> Action
+
+    var body: some View {
+        let colors = ThemeColors(theme: theme, dark: scheme == .dark)
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(colors.action, in: RoundedRectangle(cornerRadius: 15))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(subtitle).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+            }
+            Spacer(minLength: 0)
+            action()
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(colors.card.ignoresSafeArea(edges: .top))
+        .overlay(alignment: .bottom) { Rectangle().fill(colors.divider).frame(height: 1) }
+    }
+}
+
 struct FootballShell: View {
     @EnvironmentObject private var updates: AppUpdates
     @Environment(\.appTheme) private var theme
@@ -30,41 +59,59 @@ struct BroadcastSource: Identifiable {
     let watchURL: URL
     let servers: [StreamServer]
     var note: String? = nil
+    var availableServers: [StreamServer] { servers.filter { $0.playbackURL != nil } }
+
     func playback(title: String, server: StreamServer) -> Playback {
-        Playback(title: title, url: watchURL, servers: servers,
-                 providerName: name, initialServerID: server.id)
+        Playback(title: title, sources: [self],
+                 initialChoiceID: Playback.Choice(source: self, server: server).id)
     }
 }
 
 enum BroadcastCatalog {
-    static func sources(for match: Match) async throws -> [BroadcastSource] {
+    static func sources(for match: Match, alongside matches: [Match] = []) async throws -> [BroadcastSource] {
         guard let watch = match.playbackURL else { return [] }
-        if match.providerID == "ntv" { return [try await NTVProvider.source(page: watch)] }
+        let secondary = Task { await alternate(for: match, alongside: matches) }
+        defer { secondary.cancel() }
+        do {
+            let primary = try await source(for: match, watch: watch)
+            let additional = await secondary.value
+            if let additional { return [primary, additional] }
+            return [primary]
+        } catch {
+            let additional = await secondary.value
+            if let additional { return [additional] }
+            throw error
+        }
+    }
+
+    private static func source(for match: Match, watch: URL) async throws -> BroadcastSource {
+        if match.providerID == "ntv" { return try await NTVProvider.source(page: watch) }
         let servers = try await WatchAPI().servers(publishedURL: watch)
-        if match.isLive,
-           watch.host == Site.origin.host, watch.path == "/watch",
+        if watch.host == Site.origin.host, watch.path == "/watch",
            servers.allSatisfy({ $0.type == "iframe" && $0.playbackURL?.host == "player.majedfiles.site" }) {
             let server = StreamServer(id: "majed-watch", name: "ماجد لايف", type: "majed_watch",
                 url: watch.absoluteString, enabled: true, is_default: true, priority: 0)
-            let primary = BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: [server])
-            if let alternate = await NTVProvider.alternateSource(for: match) { return [primary, alternate] }
-            return [primary]
+            return BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: [server])
         }
-        return servers.isEmpty ? [] : [BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: servers)]
+        return BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: servers)
+    }
+
+    private static func alternate(for match: Match, alongside matches: [Match]) async -> BroadcastSource? {
+        guard match.isLive else { return nil }
+        let candidates = matches.filter { candidate in
+            candidate.providerID != match.providerID && candidate.isLive && candidate.playbackURL != nil
+                && NTVProvider.matchesFixture(candidate, match)
+        }
+        if candidates.count == 1, let candidate = candidates.first, let watch = candidate.playbackURL {
+            return try? await source(for: candidate, watch: watch)
+        }
+        guard match.providerID == "majed" else { return nil }
+        return await NTVProvider.alternateSource(for: match)
     }
 
     static func playback(from sources: [BroadcastSource], title: String) -> Playback? {
-        guard let first = sources.first, let initial = first.servers.first else { return nil }
-        var watchURLs: [String: URL] = [:]
-        let servers = sources.flatMap { source in
-            source.servers.filter { server in
-                guard watchURLs[server.id] == nil else { return false }
-                watchURLs[server.id] = source.watchURL
-                return true
-            }
-        }
-        return Playback(title: title, url: first.watchURL, servers: servers, providerName: first.name,
-                        initialServerID: initial.id, watchURLs: watchURLs)
+        let playback = Playback(title: title, sources: sources)
+        return playback.choices.isEmpty ? nil : playback
     }
 }
 

@@ -10,8 +10,8 @@ struct MajedLiveApp: App {
     @StateObject private var notifications = UpdateNotifications.shared
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
-    @AppStorage("theme") private var themeName = AppTheme.ruby.rawValue
-    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .ruby }
+    @AppStorage("theme") private var themeName = AppTheme.emerald.rawValue
+    private var theme: AppTheme { AppTheme(rawValue: themeName) ?? .emerald }
 
     var body: some Scene {
         WindowGroup {
@@ -91,23 +91,15 @@ enum AppTheme: String, CaseIterable, Identifiable {
         }
     }
     func background(dark: Bool) -> Color {
-        switch self {
-        case .ruby: return Color(uiColor: color(dark ? 0x120E12 : 0xFCF4F5))
-        case .ocean: return Color(uiColor: color(dark ? 0x0B1420 : 0xF1F6FD))
-        case .emerald: return Color(uiColor: color(dark ? 0x0B1915 : 0xF0F8F4))
-        }
+        Color(uiColor: color(dark ? 0x0C131B : 0xF2F5F6))
     }
     func card(dark: Bool) -> Color {
-        switch self {
-        case .ruby: return Color(uiColor: color(dark ? 0x251B23 : 0xFFFFFF))
-        case .ocean: return Color(uiColor: color(dark ? 0x182638 : 0xFFFFFF))
-        case .emerald: return Color(uiColor: color(dark ? 0x192D25 : 0xFFFFFF))
-        }
+        Color(uiColor: color(dark ? 0x17222D : 0xFFFFFF))
     }
 }
 
 private struct AppThemeKey: EnvironmentKey {
-    static let defaultValue = AppTheme.ruby
+    static let defaultValue = AppTheme.emerald
 }
 
 extension EnvironmentValues {
@@ -123,6 +115,9 @@ struct ThemeColors {
     var accent: Color { theme.accent(dark: dark) }
     var background: Color { theme.background(dark: dark) }
     var card: Color { theme.card(dark: dark) }
+    var action: Color { theme.accent(dark: false) }
+    var divider: Color { Color.primary.opacity(dark ? 0.11 : 0.08) }
+    var highlight: Color { accent.opacity(dark ? 0.17 : 0.1) }
 }
 
 enum Site {
@@ -299,6 +294,7 @@ final class ScheduleModel: ObservableObject {
         requestID = id
         if clear || date != displayedDate { matches = []; updated = nil }
         loading = true
+        defer { if requestID == id { loading = false } }
         error = nil
         let result = await FootballSchedule.load(date: date, ntvServer: ntvServer)
         guard !Task.isCancelled, requestID == id else { return }
@@ -310,18 +306,33 @@ final class ScheduleModel: ObservableObject {
         if !result.unavailable.isEmpty {
             error = "تعذّر تحديث " + result.unavailable.joined(separator: " و ") + ". اسحب لإعادة المحاولة."
         }
-        if requestID == id { loading = false }
     }
 }
 
 struct Playback: Identifiable {
+    struct Choice: Identifiable {
+        let source: BroadcastSource
+        let server: StreamServer
+
+        var id: String { source.id + "/" + server.id }
+    }
+
     let id = UUID()
     let title: String
-    let url: URL
-    let servers: [StreamServer]
-    var providerName = "ماجد لايف"
-    var initialServerID: String? = nil
-    var watchURLs: [String: URL] = [:]
+    let sources: [BroadcastSource]
+    let choices: [Choice]
+    let initialChoiceID: String?
+
+    init(title: String, sources: [BroadcastSource], initialChoiceID: String? = nil) {
+        self.title = title
+        let playable = sources.filter { !$0.availableServers.isEmpty }
+        self.sources = playable
+        let choices = playable.flatMap { source in
+            source.availableServers.map { Choice(source: source, server: $0) }
+        }
+        self.choices = choices
+        self.initialChoiceID = initialChoiceID ?? choices.first?.id
+    }
 }
 
 struct StreamServer: Decodable, Identifiable {
@@ -459,7 +470,7 @@ struct SettingsScreen: View {
     @ObservedObject var updates: AppUpdates
     var standalone = false
     @AppStorage("appearance") private var appearance = Appearance.automatic.rawValue
-    @AppStorage("theme") private var themeName = AppTheme.ruby.rawValue
+    @AppStorage("theme") private var themeName = AppTheme.emerald.rawValue
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         NavigationStack {

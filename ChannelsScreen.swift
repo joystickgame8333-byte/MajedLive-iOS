@@ -40,8 +40,7 @@ struct ChannelsScreen: View {
     private var colors: ThemeColors { ThemeColors(theme: theme, dark: scheme == .dark) }
     private var channels: [LiveChannel] {
         (ChannelCatalog.channels + ntvChannels).filter { channel in
-            let source = channel.id.hasPrefix("ntv:") ? "ntv" : "fajr"
-            return (provider == "all" || source == provider) && (allRegions || channel.region == "arabic") &&
+            (provider == "all" || channel.source.id == provider) && (allRegions || channel.region == "arabic") &&
                 (search.isEmpty || channel.name.localizedCaseInsensitiveContains(search))
         }
     }
@@ -49,15 +48,12 @@ struct ChannelsScreen: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("القنوات المباشرة").font(.title2.bold())
-                        Text("اختر قناة، ثم شاهد مباشرة")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                    }
+                LazyVStack(alignment: .leading, spacing: 16) {
                     SearchField(text: $search, prompt: "ابحث عن قناة")
                     ProviderPicker(selection: $provider, options: [("all", "الكل"), ("fajr", "الفجر"), ("ntv", "NTV")])
-                    Toggle("إظهار القنوات الدولية أيضًا", isOn: $allRegions).font(.caption).tint(colors.accent)
+                    Toggle("إظهار القنوات الدولية", isOn: $allRegions).font(.subheadline).tint(colors.action)
+                        .padding(.horizontal, 13).padding(.vertical, 9)
+                        .background(colors.card, in: RoundedRectangle(cornerRadius: 14))
                     if let loadError {
                         HStack {
                             Text(loadError).font(.caption)
@@ -72,20 +68,18 @@ struct ChannelsScreen: View {
                             Text("لا توجد قنوات تطابق اختيارك").font(.subheadline)
                         }.foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 40)
                     }
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-                        ForEach(channels) { channel in
-                            channelCard(channel)
-                        }
-                    }
-                }.padding(20)
+                    channelGroups
+                }.padding(.horizontal, 16).padding(.vertical, 14)
             }.background(colors.background)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    HStack {
-                        Label("القنوات", systemImage: "play.tv.fill").font(.title3.bold())
-                        Spacer()
-                        Text("\(channels.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }.padding(.horizontal, 20).padding(.vertical, 16)
-                        .background(colors.card.ignoresSafeArea(edges: .top))
+                    FootballSectionHeader(title: "القنوات", subtitle: FootballBrand.name, icon: "play.tv.fill") {
+                        Text(channels.count.formatted())
+                            .font(.subheadline.weight(.semibold)).monospacedDigit()
+                            .foregroundStyle(colors.accent)
+                            .padding(.horizontal, 12).frame(minHeight: 34)
+                            .background(colors.highlight, in: Capsule())
+                            .accessibilityLabel("\(channels.count) قناة")
+                    }
                 }
                 .toolbar(.hidden, for: .navigationBar)
                 .refreshable { await refresh() }
@@ -97,19 +91,46 @@ struct ChannelsScreen: View {
         }
     }
 
-    private func channelCard(_ channel: LiveChannel) -> some View {
-        Button { Task { await open(channel) } } label: {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Image(systemName: "play.tv.fill").font(.title2).foregroundStyle(colors.accent)
-                    Spacer()
-                    if opening == channel.id { ProgressView() }
-                    else { Image(systemName: "play.circle.fill").foregroundStyle(colors.accent) }
+    private var channelGroups: some View {
+        let grouped = Dictionary(grouping: channels) { $0.source.id }
+        var seen = Set<String>()
+        let sources = channels.map(\.source).filter { seen.insert($0.id).inserted }
+        return ForEach(sources) { source in
+            VStack(alignment: .leading, spacing: 0) {
+                Label(source.name, systemImage: "tv")
+                    .font(.subheadline.bold())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 13).padding(.vertical, 11)
+                    .background(colors.highlight.opacity(0.65))
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(grouped[source.id, default: []]) { channel in
+                    Rectangle().fill(colors.divider).frame(height: 1).accessibilityHidden(true)
+                    channelRow(channel)
                 }
-                Text(channel.name).font(.subheadline.bold()).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                Text(channel.source.servers.count > 1 ? "\(channel.source.servers.count) مصادر · " + channel.source.name : channel.source.name).font(.caption).foregroundStyle(.secondary)
-            }.padding(16).frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
-                .background(colors.card, in: RoundedRectangle(cornerRadius: 20))
+            }.background(colors.card, in: RoundedRectangle(cornerRadius: 17))
+                .clipShape(RoundedRectangle(cornerRadius: 17))
+        }
+    }
+
+    private func channelRow(_ channel: LiveChannel) -> some View {
+        Button { Task { await open(channel) } } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "tv.fill").font(.subheadline).foregroundStyle(colors.accent)
+                    .frame(width: 40, height: 40)
+                    .background(colors.highlight, in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(channel.name).font(.subheadline.bold()).lineLimit(2)
+                    if channel.source.servers.count > 1 {
+                        Text("\(channel.source.servers.count) بثوث متاحة").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                Group {
+                    if opening == channel.id { ProgressView() }
+                    else { Image(systemName: "play.fill").font(.footnote.weight(.bold)).foregroundStyle(colors.accent) }
+                }.frame(width: 44, height: 44)
+            }.padding(.horizontal, 13).padding(.vertical, 9).contentShape(Rectangle())
         }.buttonStyle(.plain).disabled(opening != nil)
     }
 

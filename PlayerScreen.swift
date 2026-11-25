@@ -4,10 +4,10 @@ import AVKit
 struct PlaybackAttempts {
     var failed: Set<String> = []
     var automaticSwitches = 0
-    mutating func next(after id: String, servers: [StreamServer]) -> StreamServer? {
+    mutating func next(after id: String, choices: [Playback.Choice]) -> Playback.Choice? {
         failed.insert(id)
         guard automaticSwitches < 2,
-              let next = servers.first(where: { $0.playbackURL != nil && !failed.contains($0.id) }) else { return nil }
+              let next = choices.first(where: { !failed.contains($0.id) }) else { return nil }
         automaticSwitches += 1
         return next
     }
@@ -46,22 +46,21 @@ struct PlayerScreen: View {
     @State private var controlsVisible = true
     @State private var controlsActivity = UUID()
     private var colors: ThemeColors { ThemeColors(theme: theme, dark: scheme == .dark) }
-    private var selected: StreamServer? {
-        playback.servers.first { $0.id == selectedID } ?? playback.servers.first { $0.is_default == true } ?? playback.servers.first
+    private var selected: Playback.Choice? {
+        playback.choices.first { $0.id == selectedID }
+            ?? playback.choices.first { $0.server.is_default == true }
+            ?? playback.choices.first
     }
     private var loadingKey: String { (selected?.id ?? "none") + retry.uuidString }
     private var failure: String? { model.error ?? web.error }
-    private var isMajedWatch: Bool { selected?.type == "majed_watch" }
-    private var providerName: String {
-        guard let id = selected?.id, playback.watchURLs[id]?.host == NTVProvider.origin.host else { return playback.providerName }
-        return "NTV"
-    }
+    private var isMajedWatch: Bool { selected?.server.type == "majed_watch" }
+    private var providerName: String { selected?.source.name ?? "البث" }
     private var qualities: [StreamQuality] { model.embedded == nil ? model.qualities : web.qualities }
     private var qualityID: Int { model.embedded == nil ? model.selectedQuality : web.selectedQuality }
     private var qualityLabel: String { qualities.first { $0.id == qualityID }?.label ?? "حسب البث" }
     init(playback: Playback) {
         self.playback = playback
-        _selectedID = State(initialValue: playback.initialServerID)
+        _selectedID = State(initialValue: playback.initialChoiceID)
     }
 
     var body: some View {
@@ -73,9 +72,9 @@ struct PlayerScreen: View {
                 video(cinema: layout.cinema)
                     .frame(width: layout.width, height: layout.videoHeight)
                 ScrollView {
-                    PlayerDetails(title: playback.title, provider: providerName,
-                        sourceNumber: sourceNumber, sourceCount: playback.servers.count,
-                        quality: qualityLabel, notice: notice,
+                    PlayerDetails(sources: playback.sources, activeSourceID: selected?.source.id,
+                        activeServerName: selected?.server.name, quality: qualityLabel, notice: notice,
+                        selectSource: selectSource,
                         expand: { expanded = true }, chooseSource: { panel = .sources },
                         chooseQuality: { panel = .quality }, retry: retryCurrent)
                         .padding(20).padding(.bottom, geometry.safeAreaInsets.bottom)
@@ -104,7 +103,7 @@ struct PlayerScreen: View {
         .onChange(of: panel) { _ in revealControls() }
         .onChange(of: expanded) { _ in revealControls() }
         .sheet(item: $panel) { choice in
-            PlayerOptions(panel: choice, servers: playback.servers, selectedID: selected?.id,
+            PlayerOptions(panel: choice, playback: playback, selectedID: selected?.id,
                 failed: attempts.failed, qualities: qualities, qualityID: qualityID,
                 selectServer: choose, selectQuality: chooseQuality)
         }
@@ -124,12 +123,11 @@ struct PlayerScreen: View {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    private var sourceNumber: Int { (playback.servers.firstIndex { $0.id == selected?.id } ?? 0) + 1 }
     private func video(cinema: Bool) -> some View {
         ZStack {
             Color.black
             if let embedded = model.embedded {
-                EmbeddedPlayerView(url: embedded, referrer: model.embeddedReferrer ?? playback.url,
+                EmbeddedPlayerView(url: embedded, referrer: model.embeddedReferrer ?? selected?.source.watchURL ?? embedded,
                     state: web, usesMajedWatchPage: isMajedWatch).id(loadingKey)
             } else {
                 NativePlayerSurface(player: model.player)
@@ -150,7 +148,7 @@ struct PlayerScreen: View {
                 }
             }
             if let failure {
-                PlayerFailure(message: failure, canChange: playback.servers.count > 1,
+                PlayerFailure(message: failure, canChange: playback.choices.count > 1,
                     retry: retryCurrent, change: { panel = .sources })
             }
         }
@@ -190,7 +188,7 @@ struct PlayerScreen: View {
                     }
                     if cinema {
                         Spacer()
-                        Button { panel = .sources } label: { Label("البث \(sourceNumber)", systemImage: "play.rectangle").padding(10).background(.black.opacity(0.45), in: Capsule()) }
+                        Button { panel = .sources } label: { Label(providerName, systemImage: "play.rectangle").padding(10).background(.black.opacity(0.45), in: Capsule()) }
                         Button { panel = .quality } label: { Label(qualityLabel, systemImage: "slider.horizontal.3").padding(10).background(.black.opacity(0.45), in: Capsule()) }
                     }
                 }.font(.subheadline.bold()).foregroundStyle(.white)
@@ -207,10 +205,10 @@ struct PlayerScreen: View {
     @MainActor private func load() async {
         web.reset(); handledFailure = nil; revealControls()
         guard let selected else { return }
-        await model.load(server: selected, watch: playback.watchURLs[selected.id] ?? playback.url)
+        await model.load(server: selected.server, watch: selected.source.watchURL)
         guard !Task.isCancelled, model.embedded != nil else { return }
         // The official watch control can wait for the viewer before the stream exists.
-        guard selected.type != "majed_watch" else { return }
+        guard selected.server.type != "majed_watch" else { return }
         do { try await Task.sleep(nanoseconds: 25_000_000_000) } catch { return }
         guard !Task.isCancelled, !web.started, !web.awaitingTap, web.error == nil else { return }
         web.error = "لم يبدأ الفيديو من هذا المصدر خلال وقت الانتظار."
@@ -218,14 +216,31 @@ struct PlayerScreen: View {
     private func handleFailure() {
         guard failure != nil, handledFailure != loadingKey, let selected else { return }
         handledFailure = loadingKey
-        if let next = attempts.next(after: selected.id, servers: playback.servers) {
-            notice = "لم يستجب البث السابق؛ نجرب بثًا بديلًا."
+        if let next = attempts.next(after: selected.id, choices: playback.choices) {
+            model.stop()
+            web.reset()
+            notice = "تعذّر البث السابق. جاري تجربة \(next.source.name)."
             selectedID = next.id
         }
     }
-    private func choose(_ server: StreamServer) {
-        attempts.automaticSwitches = 0; attempts.failed.remove(server.id)
-        notice = nil; selectedID = server.id; retry = UUID(); panel = nil
+    private func selectSource(_ source: BroadcastSource) {
+        if selected?.source.id == source.id {
+            panel = .sources
+            return
+        }
+        let choices = playback.choices.filter { $0.source.id == source.id }
+        if let choice = choices.first(where: { $0.server.is_default == true }) ?? choices.first {
+            choose(choice)
+        }
+    }
+
+    private func choose(_ choice: Playback.Choice) {
+        panel = nil
+        if choice.id == selected?.id && failure == nil { return }
+        attempts = PlaybackAttempts()
+        model.stop()
+        web.reset()
+        notice = nil; selectedID = choice.id; retry = UUID()
     }
     private func retryCurrent() {
         attempts.automaticSwitches = 0
