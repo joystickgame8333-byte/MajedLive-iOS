@@ -41,6 +41,11 @@ enum BroadcastCatalog {
         guard let watch = match.playbackURL else { return [] }
         if match.providerID == "ntv" { return [try await NTVProvider.source(page: watch)] }
         let servers = try await WatchAPI().servers(publishedURL: watch)
+        if match.isLive,
+           servers.allSatisfy({ $0.type == "iframe" && $0.playbackURL?.host == "player.majedfiles.site" }),
+           let alternate = await NTVProvider.alternateSource(for: match) {
+            return [alternate]
+        }
         return servers.isEmpty ? [] : [BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: servers)]
     }
 }

@@ -90,6 +90,43 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertTrue(NTVProvider.embedServers(html: "<iframe src='https://ads.example'></iframe>", page: page).isEmpty)
     }
 
+    func testNTVAlternateRequiresBothTeamsAndKickoff() throws {
+        func fixture(home: String, away: String, time: String = "20:45") throws -> Match {
+            let payload: [String: Any] = [
+                "id": "match", "date": "2026-11-25", "time": time, "state": "live",
+                "home_team": ["name": home], "away_team": ["name": away],
+                "tournament": ["name": "Champions League"]
+            ]
+            return try JSONDecoder().decode(Match.self, from: JSONSerialization.data(withJSONObject: payload))
+        }
+        let original = try fixture(home: "صباح", away: "برشلونة")
+        XCTAssertTrue(NTVProvider.matchesFixture(try fixture(home: "Sabah FK", away: "Barcelona"), original))
+        XCTAssertFalse(NTVProvider.matchesFixture(try fixture(home: "Sabah FK", away: "Real Madrid"), original))
+        XCTAssertFalse(NTVProvider.matchesFixture(try fixture(home: "Sabah FK", away: "Barcelona", time: "21:45"), original))
+    }
+
+    func testNTVReadsOnlyPublishedPlayerLinksFromWatchPageJSON() throws {
+        let page = try XCTUnwrap(URL(string: "https://ntv.cx/watch/kobra/current-match"))
+        let html = """
+        <script type="application/json" data-page="app">
+        {"props":{"match":{"sources":[{"source":"first"},{"source":"second"}]},"streams":[
+          {"embedUrl":"https://elsewhere.example/embed?stream=foreign","label":"Other site"},
+          {"embedUrl":"/embed?stream=test%2Bvideo","label":"English HD"},
+          {"embedUrl":"/embed?stream=test%2Bvideo","label":"Duplicate"}
+        ]}}</script>
+        """
+        let streams = NTVProvider.publishedStreams(html: html, page: page)
+        XCTAssertEqual(streams.map(\.type), ["ntv_embed"])
+        XCTAssertEqual(streams.map(\.name), ["English HD"])
+        XCTAssertEqual(streams.map(\.url), ["https://ntv.cx/embed?stream=test%2Bvideo"])
+        let alternatives = NTVProvider.publishedStreams(html: html, page: page, includeAlternatives: true)
+        XCTAssertEqual(alternatives.map(\.type), ["ntv_page", "ntv_page"])
+        XCTAssertEqual(alternatives.map(\.url), [
+            "https://ntv.cx/watch/kobra/current-match?source=0",
+            "https://ntv.cx/watch/kobra/current-match?source=1"
+        ])
+    }
+
     func testNTVUnwrapsOnlyPublishedFrameRegardlessOfAttributeOrder() throws {
         let page = try XCTUnwrap(URL(string: "https://ntv.cx/embed?t=fresh"))
         let html = """

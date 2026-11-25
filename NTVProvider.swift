@@ -75,6 +75,30 @@ enum NTVProvider {
         return try football(catalog, date: date, server: server)
     }
 
+    static func alternateSource(for match: Match) async -> BroadcastSource? {
+        guard let candidates = try? await matches(date: match.date),
+              !Task.isCancelled else { return nil }
+        let equivalent = candidates.filter { matchesFixture($0, match) && $0.isLive && $0.playbackURL != nil }
+        guard equivalent.count == 1, let page = equivalent.first?.playbackURL else { return nil }
+        return try? await source(page: page)
+    }
+
+    static func matchesFixture(_ candidate: Match, _ match: Match) -> Bool {
+        candidate.date == match.date && candidate.time == match.time
+            && teamKey(candidate.home_team.name) == teamKey(match.home_team.name)
+            && teamKey(candidate.away_team.name) == teamKey(match.away_team.name)
+    }
+
+    private static func teamKey(_ name: String) -> String {
+        let aliases = ["صباح": "sabah", "برشلونة": "barcelona"]
+        let normalized = name.folding(options: .diacriticInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .filter { !["fc", "fk"].contains($0) }
+            .joined(separator: " ")
+        return aliases[normalized] ?? normalized
+    }
+
     static func unescape(_ value: String) -> String {
         value.replacingOccurrences(of: "&amp;", with: "&")
             .replacingOccurrences(of: "&quot;", with: "\"")
@@ -121,6 +145,47 @@ enum NTVProvider {
                 type: "ntv_page", url: url.absoluteString, enabled: true, is_default: index == 0, priority: index)
         }
     }
+    private struct WatchPageData: Decodable {
+        struct Properties: Decodable {
+            struct Stream: Decodable {
+                let embedUrl: String
+                let label: String?
+            }
+            struct WatchMatch: Decodable {
+                struct Source: Decodable { let source: String? }
+                let sources: [Source]?
+            }
+            let streams: [Stream]?
+            let match: WatchMatch?
+        }
+        let props: Properties
+    }
+
+    static func publishedStreams(html: String, page: URL, includeAlternatives: Bool = false) -> [StreamServer] {
+        let pattern = #"<script\b(?=[^>]*\bdata-page\s*=\s*["']app["'])(?=[^>]*\btype\s*=\s*["']application/json["'])[^>]*>(.*?)</script\s*>"#
+        guard let json = captured(pattern, in: html).first?.first,
+              let data = try? JSONDecoder().decode(WatchPageData.self, from: Data(json.utf8)) else { return [] }
+        if includeAlternatives, let sources = data.props.match?.sources, sources.count > 1 {
+            return sources.enumerated().compactMap { index, source in
+                guard var target = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return nil }
+                target.queryItems = (target.queryItems ?? []).filter { $0.name != "source" }
+                    + [URLQueryItem(name: "source", value: String(index))]
+                guard let url = target.url else { return nil }
+                return StreamServer(id: "ntv-source-\(index)", name: MatchInformation.text(source.source) ?? "بث NTV",
+                    type: "ntv_page", url: url.absoluteString, enabled: true, is_default: index == 0, priority: index)
+            }
+        }
+        var seen = Set<URL>()
+        return (data.props.streams ?? []).enumerated().compactMap { index, stream in
+            guard let url = URL(string: stream.embedUrl, relativeTo: page)?.absoluteURL,
+                  url.scheme == "https", url.host == origin.host, url.path == "/embed",
+                  url.port == nil, url.user == nil, url.password == nil,
+                  seen.insert(url).inserted else { return nil }
+            return StreamServer(id: "ntv-embed-\(index)", name: MatchInformation.text(stream.label) ?? "بث NTV",
+                type: "ntv_embed", url: url.absoluteString, enabled: true, is_default: nil, priority: index)
+        }
+    }
+
     static func source(page: URL, includeAlternatives: Bool = true) async throws -> BroadcastSource {
         guard page.scheme == "https", page.host == origin.host,
               page.path.hasPrefix("/watch/") || page.path.hasPrefix("/channel/") else {
@@ -129,7 +194,8 @@ enum NTVProvider {
         let (data, _) = try await PublishedStream.request(page, headers: ["Referer": origin.absoluteString])
         guard let html = String(data: data, encoding: .utf8) else { throw APIError.server("تعذّر قراءة مصدر NTV.") }
         let alternatives = includeAlternatives ? sourceChoices(html: html, page: page) : []
-        let servers = alternatives.count > 1 ? alternatives : embedServers(html: html, page: page)
+        let legacy = alternatives.count > 1 ? alternatives : embedServers(html: html, page: page)
+        let servers = legacy.isEmpty ? publishedStreams(html: html, page: page, includeAlternatives: includeAlternatives) : legacy
         guard !servers.isEmpty else { throw APIError.server("لم ينشر NTV مشغّلًا لهذه المباراة أو القناة حاليًا.") }
         return BroadcastSource(id: "ntv", name: "NTV", watchURL: page, servers: servers)
     }

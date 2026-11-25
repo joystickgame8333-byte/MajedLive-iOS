@@ -75,10 +75,15 @@ final class UnifiedPlayerModel: ObservableObject {
                 let resolved = try await NTVProvider.source(page: url, includeAlternatives: false)
                 try Task.checkCancellation()
                 guard generation == run else { return }
-                guard let frame = resolved.servers.first?.playbackURL else { throw APIError.server("هذا البث غير متاح الآن.") }
+                guard let stream = resolved.servers.first, let frame = stream.playbackURL else { throw APIError.server("هذا البث غير متاح الآن.") }
+                if stream.type == "ntv_embed" {
+                    embeddedReferrer = url; embedded = frame; loading = false; return
+                }
                 let direct = try await NTVProvider.embeddedSource(frame, referrer: url)
                 guard generation == run, !Task.isCancelled else { return }
                 embeddedReferrer = direct.referrer; embedded = direct.url; loading = false; return
+            } else if server.type == "ntv_embed" {
+                embeddedReferrer = watch; embedded = url; loading = false; return
             } else if server.type == "fajr_hls_page" {
                 let resolved = try await FajrStream.resolve(page: url)
                 guard generation == run else { return }
