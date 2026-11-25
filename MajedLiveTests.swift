@@ -320,6 +320,23 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(playback.servers.count, 2)
     }
 
+    func testMajedAndNTVKeepTheirOwnWatchPagesInOnePlayer() throws {
+        let majedPage = try XCTUnwrap(URL(string: "https://majed-kooora.com/watch?mk=example"))
+        let ntvPage = try XCTUnwrap(URL(string: "https://ntv.cx/watch/kobra/example"))
+        let majed = StreamServer(id: "majed-watch", name: "ماجد", type: "majed_watch", url: majedPage.absoluteString,
+                                 enabled: true, is_default: true, priority: 0)
+        let ntv = StreamServer(id: "ntv-embed-0", name: "NTV", type: "ntv_embed", url: "https://ntv.cx/embed?stream=example",
+                               enabled: true, is_default: nil, priority: 0)
+        let playback = try XCTUnwrap(BroadcastCatalog.playback(from: [
+            BroadcastSource(id: "majed", name: "ماجد", watchURL: majedPage, servers: [majed]),
+            BroadcastSource(id: "ntv", name: "NTV", watchURL: ntvPage, servers: [ntv])
+        ], title: "Match"))
+        XCTAssertEqual(playback.initialServerID, majed.id)
+        XCTAssertEqual(playback.servers.map(\.id), [majed.id, ntv.id])
+        XCTAssertEqual(playback.watchURLs[majed.id], majedPage)
+        XCTAssertEqual(playback.watchURLs[ntv.id], ntvPage)
+    }
+
     func testUpdateAlertsRequirePublishedIPAAndSkipInstalledOrAlreadyNotifiedBuilds() throws {
         func release(build: String = "build-20", draft: Bool = false,
                      prerelease: Bool = false, assets: Bool = true,

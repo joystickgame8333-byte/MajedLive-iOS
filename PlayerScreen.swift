@@ -51,6 +51,11 @@ struct PlayerScreen: View {
     }
     private var loadingKey: String { (selected?.id ?? "none") + retry.uuidString }
     private var failure: String? { model.error ?? web.error }
+    private var isMajedWatch: Bool { selected?.type == "majed_watch" }
+    private var providerName: String {
+        guard let id = selected?.id, playback.watchURLs[id]?.host == NTVProvider.origin.host else { return playback.providerName }
+        return "NTV"
+    }
     private var qualities: [StreamQuality] { model.embedded == nil ? model.qualities : web.qualities }
     private var qualityID: Int { model.embedded == nil ? model.selectedQuality : web.selectedQuality }
     private var qualityLabel: String { qualities.first { $0.id == qualityID }?.label ?? "حسب البث" }
@@ -63,12 +68,12 @@ struct PlayerScreen: View {
         GeometryReader { geometry in
             let layout = PlayerLayout(size: geometry.size, expanded: expanded, windowedLandscape: windowedLandscape)
             VStack(spacing: 0) {
-                PlayerHeading(title: playback.title, subtitle: playback.providerName, close: { dismiss() })
+                PlayerHeading(title: playback.title, subtitle: providerName, close: { dismiss() })
                     .frame(height: layout.cinema ? 0 : 64).clipped().opacity(layout.cinema ? 0 : 1)
                 video(cinema: layout.cinema)
                     .frame(width: layout.width, height: layout.videoHeight)
                 ScrollView {
-                    PlayerDetails(title: playback.title, provider: playback.providerName,
+                    PlayerDetails(title: playback.title, provider: providerName,
                         sourceNumber: sourceNumber, sourceCount: playback.servers.count,
                         quality: qualityLabel, notice: notice,
                         expand: { expanded = true }, chooseSource: { panel = .sources },
@@ -124,7 +129,8 @@ struct PlayerScreen: View {
         ZStack {
             Color.black
             if let embedded = model.embedded {
-                EmbeddedPlayerView(url: embedded, referrer: model.embeddedReferrer ?? playback.url, state: web).id(loadingKey)
+                EmbeddedPlayerView(url: embedded, referrer: model.embeddedReferrer ?? playback.url,
+                    state: web, usesMajedWatchPage: isMajedWatch).id(loadingKey)
             } else {
                 NativePlayerSurface(player: model.player)
             }
@@ -132,7 +138,7 @@ struct PlayerScreen: View {
                 VStack(spacing: 10) { ProgressView().tint(.white); Text("تجهيز البث…").font(.caption) }
                     .foregroundStyle(.white).allowsHitTesting(false)
             }
-            if model.embedded != nil && !web.started && !web.awaitingTap && failure == nil {
+            if model.embedded != nil && !isMajedWatch && !web.started && !web.awaitingTap && failure == nil {
                 VStack { Text("تحميل البث… يمكنك اختيار بث آخر").font(.caption).padding(10)
                     .background(.black.opacity(0.75), in: Capsule()); Spacer() }
                     .padding(.top, cinema ? 55 : 12).foregroundStyle(.white).allowsHitTesting(false)
@@ -201,8 +207,10 @@ struct PlayerScreen: View {
     @MainActor private func load() async {
         web.reset(); handledFailure = nil; revealControls()
         guard let selected else { return }
-        await model.load(server: selected, watch: playback.url)
+        await model.load(server: selected, watch: playback.watchURLs[selected.id] ?? playback.url)
         guard !Task.isCancelled, model.embedded != nil else { return }
+        // The official watch control can wait for the viewer before the stream exists.
+        guard selected.type != "majed_watch" else { return }
         do { try await Task.sleep(nanoseconds: 25_000_000_000) } catch { return }
         guard !Task.isCancelled, !web.started, !web.awaitingTap, web.error == nil else { return }
         web.error = "لم يبدأ الفيديو من هذا المصدر خلال وقت الانتظار."

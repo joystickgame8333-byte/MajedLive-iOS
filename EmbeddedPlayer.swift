@@ -36,7 +36,8 @@ struct EmbeddedPlayerView: UIViewRepresentable {
     let url: URL
     let referrer: URL
     let state: EmbeddedPlayerState
-    func makeCoordinator() -> Coordinator { Coordinator(state: state) }
+    var usesMajedWatchPage = false
+    func makeCoordinator() -> Coordinator { Coordinator(state: state, usesMajedWatchPage: usesMajedWatchPage) }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
@@ -47,6 +48,7 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         // Expose only published player controls. Do not replace stream URLs, credentials, or DRM.
         let qualityBridge = """
         (() => {
+          if (\(usesMajedWatchPage) && location.hostname !== 'player.majedfiles.site') return;
           const send = value => window.webkit.messageHandlers.footballQuality.postMessage(value);
           let lastTime = -1, errorSince = 0;
           const report = () => {
@@ -89,7 +91,11 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         })();
         """
         configuration.userContentController.addUserScript(WKUserScript(source: qualityBridge, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
-        configuration.userContentController.addUserScript(WKUserScript(source: PlayerAdProtection.script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        if usesMajedWatchPage {
+            configuration.userContentController.addUserScript(WKUserScript(source: Self.majedPlayerLayout, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        } else {
+            configuration.userContentController.addUserScript(WKUserScript(source: PlayerAdProtection.script, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+        }
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.isOpaque = false; view.backgroundColor = .black; view.scrollView.backgroundColor = .black
         view.scrollView.isScrollEnabled = false
@@ -98,8 +104,12 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         // Navigate to the published embed itself so its real origin/cookies and nested
         // player navigation work normally, instead of creating an extra synthetic iframe.
         var request = URLRequest(url: url)
-        request.setValue(referrer.absoluteString, forHTTPHeaderField: "Referer")
         request.timeoutInterval = 25
+        if usesMajedWatchPage {
+            view.load(request)
+            return view
+        }
+        request.setValue(referrer.absoluteString, forHTTPHeaderField: "Referer")
         // Install rules before the first request, including every nested frame.
         let coordinator = context.coordinator
         WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "football-player-ads-v2", encodedContentRuleList: PlayerAdProtection.rules) { [weak view, weak coordinator] rules, _ in
@@ -113,6 +123,42 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+
+    private static let majedPlayerLayout = """
+    (() => {
+      const officialWatch = location.hostname === 'majed-kooora.com' && location.pathname === '/watch';
+      const publishedRedirect = location.hostname === 'live.xn----zmcaegc7cl3msazv.com' && location.pathname === '/';
+      if (!officialWatch && !publishedRedirect) return;
+      if (!document.getElementById('mkWatchButton') || !document.getElementById('mkPlayerStage')) return;
+      const style = document.createElement('style');
+      style.textContent = `
+        body { overflow: hidden !important; }
+        html::after {
+          content: ''; display: block; position: fixed; inset: 0;
+          background: black; z-index: 9000;
+        }
+        #mkWatchButton {
+          position: fixed !important; z-index: 9001 !important; width: max-content;
+          max-width: 90%; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        }
+        #mkWatchNotice {
+          position: fixed; z-index: 9001; inset-inline: 12px; bottom: 16px;
+          color: white; text-align: center;
+        }
+        #mkPlayerStage:has(iframe, video) {
+          position: fixed !important; inset: 0 !important; z-index: 9002 !important;
+          width: 100% !important; height: 100% !important; max-height: none !important;
+          border: none !important; border-radius: 0 !important; background: black;
+        }
+        #mkPlayerStage iframe, #mkPlayerStage video {
+          position: absolute !important; inset: 0 !important;
+          width: 100% !important; height: 100% !important; border: 0;
+        }
+        #mkRewardDialog, #mkAdblockGate, #mkPrivacyChoices { z-index: 9003 !important; }
+      `;
+      document.head.appendChild(style);
+    })();
+    """
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         coordinator.active = false
         view.configuration.userContentController.removeScriptMessageHandler(forName: "footballQuality")
@@ -121,8 +167,12 @@ struct EmbeddedPlayerView: UIViewRepresentable {
     }
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         let state: EmbeddedPlayerState
+        let usesMajedWatchPage: Bool
         var active = true
-        init(state: EmbeddedPlayerState) { self.state = state }
+        init(state: EmbeddedPlayerState, usesMajedWatchPage: Bool) {
+            self.state = state
+            self.usesMajedWatchPage = usesMajedWatchPage
+        }
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard active, message.name == "footballQuality", message.webView === state.webView,
                   let payload = message.body as? [String: Any] else { return }
@@ -143,7 +193,11 @@ struct EmbeddedPlayerView: UIViewRepresentable {
             if let selected = payload["selected"] as? Int, selected != state.selectedQuality { state.selectedQuality = selected }
         }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if PlayerAdProtection.isBlocked(action.request.url) { decisionHandler(.cancel); return }
+            if !usesMajedWatchPage && PlayerAdProtection.isBlocked(action.request.url) { decisionHandler(.cancel); return }
+            if usesMajedWatchPage, action.targetFrame?.isMainFrame == true,
+               !Self.isMajedWatchNavigation(action.request.url) {
+                decisionHandler(.cancel); return
+            }
             if action.targetFrame == nil || (action.targetFrame?.isMainFrame == true && action.navigationType == .linkActivated) {
                 decisionHandler(.cancel); return
             }
@@ -151,6 +205,12 @@ struct EmbeddedPlayerView: UIViewRepresentable {
                 decisionHandler(.cancel); return
             }
             decisionHandler(.allow)
+        }
+        private static func isMajedWatchNavigation(_ url: URL?) -> Bool {
+            guard let url, url.scheme == "https", url.port == nil,
+                  url.user == nil, url.password == nil else { return false }
+            return (url.host == Site.origin.host && url.path == "/watch")
+                || (url.host == "live.xn----zmcaegc7cl3msazv.com" && url.path == "/")
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }

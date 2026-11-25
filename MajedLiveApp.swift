@@ -321,6 +321,7 @@ struct Playback: Identifiable {
     let servers: [StreamServer]
     var providerName = "ماجد لايف"
     var initialServerID: String? = nil
+    var watchURLs: [String: URL] = [:]
 }
 
 struct StreamServer: Decodable, Identifiable {

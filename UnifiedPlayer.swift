@@ -82,6 +82,8 @@ final class UnifiedPlayerModel: ObservableObject {
                 let direct = try await NTVProvider.embeddedSource(frame, referrer: url)
                 guard generation == run, !Task.isCancelled else { return }
                 embeddedReferrer = direct.referrer; embedded = direct.url; loading = false; return
+            } else if server.type == "majed_watch" {
+                embedded = url; loading = false; return
             } else if server.type == "ntv_embed" {
                 embeddedReferrer = watch; embedded = url; loading = false; return
             } else if server.type == "fajr_hls_page" {

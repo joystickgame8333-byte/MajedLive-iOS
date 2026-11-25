@@ -42,11 +42,29 @@ enum BroadcastCatalog {
         if match.providerID == "ntv" { return [try await NTVProvider.source(page: watch)] }
         let servers = try await WatchAPI().servers(publishedURL: watch)
         if match.isLive,
-           servers.allSatisfy({ $0.type == "iframe" && $0.playbackURL?.host == "player.majedfiles.site" }),
-           let alternate = await NTVProvider.alternateSource(for: match) {
-            return [alternate]
+           watch.host == Site.origin.host, watch.path == "/watch",
+           servers.allSatisfy({ $0.type == "iframe" && $0.playbackURL?.host == "player.majedfiles.site" }) {
+            let server = StreamServer(id: "majed-watch", name: "ماجد لايف", type: "majed_watch",
+                url: watch.absoluteString, enabled: true, is_default: true, priority: 0)
+            let primary = BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: [server])
+            if let alternate = await NTVProvider.alternateSource(for: match) { return [primary, alternate] }
+            return [primary]
         }
         return servers.isEmpty ? [] : [BroadcastSource(id: "majed", name: "ماجد لايف", watchURL: watch, servers: servers)]
+    }
+
+    static func playback(from sources: [BroadcastSource], title: String) -> Playback? {
+        guard let first = sources.first, let initial = first.servers.first else { return nil }
+        var watchURLs: [String: URL] = [:]
+        let servers = sources.flatMap { source in
+            source.servers.filter { server in
+                guard watchURLs[server.id] == nil else { return false }
+                watchURLs[server.id] = source.watchURL
+                return true
+            }
+        }
+        return Playback(title: title, url: first.watchURL, servers: servers, providerName: first.name,
+                        initialServerID: initial.id, watchURLs: watchURLs)
     }
 }
 

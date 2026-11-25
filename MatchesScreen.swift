@@ -250,9 +250,7 @@ struct MatchesScreen: View {
             let sources = try await BroadcastCatalog.sources(for: current)
             guard !sources.isEmpty else { message = "لا توجد مصادر بث متاحة لهذه المباراة حاليًا."; return }
             let title = "\(current.home_team.name) × \(current.away_team.name)"
-            if let source = sources.first, let server = source.servers.first {
-                playback = source.playback(title: title, server: server)
-            }
+            playback = BroadcastCatalog.playback(from: sources, title: title)
         } catch {
             message = (error as? APIError)?.errorDescription ?? "تعذّر التحقق من البث. تأكد من الإنترنت وحاول مجددًا."
         }
