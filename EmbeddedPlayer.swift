@@ -105,18 +105,22 @@ struct EmbeddedPlayerView: UIViewRepresentable {
         // player navigation work normally, instead of creating an extra synthetic iframe.
         var request = URLRequest(url: url)
         request.timeoutInterval = 25
-        if usesMajedWatchPage {
-            view.load(request)
-            return view
+        if !usesMajedWatchPage {
+            request.setValue(referrer.absoluteString, forHTTPHeaderField: "Referer")
         }
-        request.setValue(referrer.absoluteString, forHTTPHeaderField: "Referer")
-        // Install rules before the first request, including every nested frame.
+        // Majed can continue through its own fallback when this ad request is unavailable.
         let coordinator = context.coordinator
-        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "football-player-ads-v2", encodedContentRuleList: PlayerAdProtection.rules) { [weak view, weak coordinator] rules, _ in
+        let identifier = usesMajedWatchPage ? "football-majed-reward-ad-v1" : "football-player-ads-v2"
+        let contentRules = usesMajedWatchPage ? PlayerAdProtection.majedRewardRules : PlayerAdProtection.rules
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: contentRules) { [weak view, weak coordinator] rules, _ in
             DispatchQueue.main.async {
                 guard let view, let coordinator, coordinator.active else { return }
-                guard let rules else { state.error = "تعذّر تجهيز حجب الإعلانات. أعد المحاولة."; return }
-                view.configuration.userContentController.add(rules)
+                if let rules {
+                    view.configuration.userContentController.add(rules)
+                } else if !coordinator.usesMajedWatchPage {
+                    state.error = "تعذّر تجهيز حجب الإعلانات. أعد المحاولة."
+                    return
+                }
                 view.load(request)
             }
         }
@@ -155,8 +159,20 @@ struct EmbeddedPlayerView: UIViewRepresentable {
           width: 100% !important; height: 100% !important; border: 0;
         }
         #mkRewardDialog, #mkAdblockGate, #mkPrivacyChoices { z-index: 9003 !important; }
+        #mkRewardDialog[data-state="loading"] .mk-reward-card > p,
+        #mkRewardDialog[data-state="loading"] #mkRewardStatus,
+        #mkRewardDialog[data-state="loading"] #mkRewardAccept:disabled { display: none; }
       `;
       document.head.appendChild(style);
+      const reward = document.getElementById('mkRewardDialog');
+      const title = document.getElementById('mkRewardTitle');
+      if (!reward || !title) return;
+      const originalTitle = title.textContent;
+      const updateTitle = () => {
+        title.textContent = reward.dataset.state === 'loading' ? 'جاري تجهيز البث…' : originalTitle;
+      };
+      new MutationObserver(updateTitle).observe(reward, { attributes: true, attributeFilter: ['data-state'] });
+      updateTitle();
     })();
     """
     static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
@@ -226,6 +242,12 @@ struct EmbeddedPlayerView: UIViewRepresentable {
 
 // Target advertising only: media CDNs, player libraries and signed stream URLs remain usable.
 enum PlayerAdProtection {
+    static let majedRewardRules = #"""
+    [{
+      "trigger": {"url-filter": "^https://securepubads[.]g[.]doubleclick[.]net/gampad/ads[?].*majed_sport_rewarded_web"},
+      "action": {"type": "block"}
+    }]
+    """#
     static let domains = ["hubeamily.com", "trovesleepit.com", "chatmate.tv", "chaturbate.com", "stripchat.com", "exoclick.com", "exosrv.com", "exdynsrv.com", "trafficjunky.net", "juicyads.com", "popads.net", "popcash.net", "adsterra.com", "doubleclick.net", "googlesyndication.com", "adsco.re"]
     static func isBlocked(_ url: URL?) -> Bool {
         guard let host = url?.host?.lowercased() else { return false }
