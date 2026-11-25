@@ -1,6 +1,5 @@
 import SwiftUI
 import AVKit
-import SafariServices
 
 struct PlaybackAttempts {
     var failed: Set<String> = []
@@ -241,29 +240,5 @@ struct NativePlayerSurface: UIViewRepresentable {
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
         override init(frame: CGRect) { super.init(frame: frame); backgroundColor = .black; playerLayer.videoGravity = .resizeAspect }
         required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    }
-}
-
-struct OfficialWatchPage: UIViewControllerRepresentable {
-    @Environment(\.dismiss) private var dismiss
-    let url: URL
-
-    func makeCoordinator() -> Coordinator { Coordinator(dismiss: dismiss) }
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        let browser = SFSafariViewController(url: url)
-        browser.dismissButtonStyle = .close
-        browser.delegate = context.coordinator
-        return browser
-    }
-
-    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
-
-    final class Coordinator: NSObject, SFSafariViewControllerDelegate {
-        let dismiss: DismissAction
-
-        init(dismiss: DismissAction) { self.dismiss = dismiss }
-
-        func safariViewControllerDidFinish(_ controller: SFSafariViewController) { dismiss() }
     }
 }

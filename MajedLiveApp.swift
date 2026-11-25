@@ -228,12 +228,6 @@ struct Match: Decodable, Identifiable {
               url.user == nil, url.password == nil else { return nil }
         return url
     }
-    var officialWatchURL: URL? {
-        guard providerID == "majed", let url = playbackURL,
-              url.host?.lowercased() == Site.origin.host, url.port == nil,
-              url.path == "/watch" else { return nil }
-        return url
-    }
     var isLive: Bool { state == "live" || state == "halftime" }
     var hasScore: Bool { (isLive || state == "finished") && (home_team.score != nil || away_team.score != nil) }
     var scoreText: String {

@@ -213,13 +213,6 @@ final class MajedLiveTests: XCTestCase {
         XCTAssertEqual(Site.media("/media/teams/logo.png")?.absoluteString, "https://majed-kooora.com/media/teams/logo.png")
         XCTAssertNil(Site.media(""))
     }
-    func testOfficialWatchPagePreservesMatchLinkAndRequiresAvailability() throws {
-        let url = "https://majed-kooora.com/watch?mk=example%2Bkey"
-        XCTAssertEqual(try match(url: url).officialWatchURL?.absoluteString, url)
-        XCTAssertNil(try match(available: false, url: url).officialWatchURL)
-        XCTAssertNil(try match(url: "https://majed-kooora.com.example/watch?mk=example").officialWatchURL)
-        XCTAssertNil(try match(url: "https://majed-kooora.com/other?mk=example").officialWatchURL)
-    }
     func testLiveClockUsesPublishedSyncAndStopsAtHalftime() throws {
         let now = Date(timeIntervalSince1970: 110)
         XCTAssertEqual(try match(state: "live", elapsed: 3590, syncedAt: 100000).clockText(now: now), "60:00")
