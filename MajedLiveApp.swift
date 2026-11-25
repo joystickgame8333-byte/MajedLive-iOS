@@ -126,7 +126,7 @@ struct ThemeColors {
 }
 
 enum Site {
-    static let origin = URL(string: "https://majed-koora.live/")!
+    static let origin = URL(string: "https://majed-kooora.com/")!
     static func media(_ value: String?) -> URL? {
         guard let value, !value.isEmpty,
               let url = URL(string: value, relativeTo: origin)?.absoluteURL,
@@ -226,6 +226,12 @@ struct Match: Decodable, Identifiable {
               let url = URL(string: value), url.scheme?.lowercased() == "https",
               let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil else { return nil }
+        return url
+    }
+    var officialWatchURL: URL? {
+        guard providerID == "majed", let url = playbackURL,
+              url.host?.lowercased() == Site.origin.host, url.port == nil,
+              url.path == "/watch" else { return nil }
         return url
     }
     var isLive: Bool { state == "live" || state == "halftime" }

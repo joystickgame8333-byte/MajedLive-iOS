@@ -15,7 +15,7 @@ struct MatchesScreen: View {
     @State private var provider = "all"
     @State private var ntvServer = "kobra"
     @State private var search = ""
-    @State private var playback: Playback?
+    @State private var playback: MatchPlayback?
     @State private var checkingMatch: String?
     @State private var message: String?
     @Environment(\.scenePhase) private var scenePhase
@@ -157,7 +157,12 @@ struct MatchesScreen: View {
                         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("تم") { showingFilters = false } } }
                 }.presentationDetents([.medium, .large])
             }
-            .fullScreenCover(item: $playback) { selected in PlayerScreen(playback: selected) }
+            .fullScreenCover(item: $playback) { selected in
+                switch selected {
+                case .official(let url): OfficialWatchPage(url: url).ignoresSafeArea()
+                case .player(let details): PlayerScreen(playback: details)
+                }
+            }
             .alert("المشاهدة", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
                 Button("حسنًا", role: .cancel) { message = nil }
             } message: { Text(message ?? "") }
@@ -247,11 +252,15 @@ struct MatchesScreen: View {
                 await model.refresh(offset: day, ntvServer: ntvServer)
                 return
             }
+            if let url = current.officialWatchURL {
+                playback = .official(url)
+                return
+            }
             let sources = try await BroadcastCatalog.sources(for: current)
             guard !sources.isEmpty else { message = "لا توجد مصادر بث متاحة لهذه المباراة حاليًا."; return }
             let title = "\(current.home_team.name) × \(current.away_team.name)"
             if let source = sources.first, let server = source.servers.first {
-                playback = source.playback(title: title, server: server)
+                playback = .player(source.playback(title: title, server: server))
             }
         } catch {
             message = (error as? APIError)?.errorDescription ?? "تعذّر التحقق من البث. تأكد من الإنترنت وحاول مجددًا."
@@ -259,3 +268,14 @@ struct MatchesScreen: View {
     }
 }
 
+private enum MatchPlayback: Identifiable {
+    case official(URL)
+    case player(Playback)
+
+    var id: String {
+        switch self {
+        case .official(let url): return url.absoluteString
+        case .player(let playback): return playback.id.uuidString
+        }
+    }
+}
